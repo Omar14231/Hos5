@@ -3,10 +3,9 @@ const express = require('express');
 
 // ========== Express لمنع الخمول ==========
 const app = express();
-const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('البوت شغال ✅'));
+// استبدل السطر الموجود بهذا:
+const PORT = process.env.PORT || 10000; 
 app.listen(PORT, '0.0.0.0', () => console.log(`✅ Express شغال على بورت ${PORT}`));
-
 // ========== البوت ==========
 const client = new Client({
   intents: [
