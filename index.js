@@ -509,9 +509,9 @@ async function handleIdentityDM(message) {
 }
 
 // ========== تشغيل البوت ==========
-const token = process.env.DISCORD_TOKEN;
+const token = process.env.DISCORD;
 if (!token) {
-  console.error('❌ ما لقيت DISCORD_TOKEN! أضفه في Environment Variables في Render.');
+  console.error('❌ ما لقيت DISCORD! أضفه في Environment Variables في Render.');
   process.exit(1);
 }
 client.login(token).catch(err => {
