@@ -1,18 +1,15 @@
+require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const express = require('express');
 const fs = require('fs');
 
-// ==========================================
-// 1. إعداد خادم الويب لمنع خمول البوت في Render
-// ==========================================
+// --- نظام البقاء متصلاً على Render ---
 const app = express();
-app.get('/', (req, res) => res.send('البوت يعمل بنجاح ومستعد!'));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`تم تشغيل خادم الويب على بورت ${PORT} لحماية البوت من الخمول.`));
+const port = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('البوت يعمل بكفاءة!'));
+app.listen(port, () => console.log(`الخادم يعمل على المنفذ ${port}`));
 
-// ==========================================
-// 2. إعداد البوت
-// ==========================================
+// --- إعداد البوت ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -24,7 +21,7 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// قاعدة بيانات بسيطة للحفظ
+// قاعدة بيانات الحفظ
 const dbFile = './database.json';
 let db = { warnings: {}, users: {}, statusChannel: null };
 if (fs.existsSync(dbFile)) {
@@ -68,7 +65,7 @@ const shopItems = {
 client.on('ready', () => {
     console.log(`تم تسجيل الدخول باسم ${client.user.tag}`);
     
-    // نظام تقليل الجوع والعطش (كل ساعة ينقص 50%)
+    // نظام تقليل الجوع والعطش
     setInterval(() => {
         for (const userId in db.users) {
             let user = db.users[userId];
@@ -76,26 +73,24 @@ client.on('ready', () => {
             if (user.thirst > 0) user.thirst = Math.max(0, user.thirst - 50);
             
             if (user.hunger === 0 || user.thirst === 0) {
-                // إعطاء رتبة الموت وتنبيه المالك
                 const guild = client.guilds.cache.first();
                 if (guild) {
                     const member = guild.members.cache.get(userId);
                     if (member) {
-                        // إزالة الرتب ما عدا الولد/البنت وإعطاء رتبة الموت
                         const rolesToKeep = [BOY_ROLE, GIRL_ROLE];
                         const newRoles = member.roles.cache.filter(r => rolesToKeep.includes(r.id)).map(r => r.id);
                         newRoles.push(DEAD_ROLE);
                         member.roles.set(newRoles).catch(console.error);
                         
                         client.users.fetch(OWNER_ID).then(owner => {
-                            owner.send(`الشخص <@${userId}> لم يأكل ومات من الجوع/العطش!`).catch(()=>{});
+                            owner.send(`الشخص <@${userId}> لم يأكل ومات من الجوع/العطش! وهو متصل`).catch(()=>{});
                         });
                     }
                 }
             }
         }
         saveDB();
-    }, 3600000); // كل ساعة
+    }, 3600000);
 });
 
 client.on('messageCreate', async message => {
@@ -104,17 +99,12 @@ client.on('messageCreate', async message => {
     const args = message.content.split(' ');
     const command = args[0];
 
-    // ==========================================
-    // أوامر العسكر والمالك
-    // ==========================================
-    
-    // أمر إعطاء/سحب الرتب (-رول)
+    // أوامر العسكر
     if (command === '-رول') {
         const target = message.mentions.members.first();
         const role = message.mentions.roles.first();
         if (!target || !role) return message.reply('اكتب الأمر بالطريقة هذه:\n-رول @الشخص @الرتبة');
         
-        // التحقق من الرتب القوية (مثال: رتبة لديها صلاحيات الإدارة)
         if (role.permissions.has('Administrator')) {
             return message.reply('هذي رتبة عالية بشكل كبير! انتبه ترا في رتبة قوية أنت بتحاول تعطيها. تم إلغاء العملية.');
         }
@@ -128,13 +118,12 @@ client.on('messageCreate', async message => {
         }
     }
 
-    // أمر التحذير (/تحذير)
     if (command === '/تحذير') {
         const target = message.mentions.members.first();
         const reason = message.content.split('السبب:')[1]?.trim() || 'بدون سبب';
         if (!target) return message.reply('منشن الشخص!');
 
-        let msg = await message.channel.send(`جاري التحميل... ${EMOJI_LOAD}`);
+        let msg = await message.channel.send(`تحميل... ${EMOJI_LOAD}`);
         
         if (!db.warnings[target.id]) db.warnings[target.id] = [];
         db.warnings[target.id].push({ by: message.author.id, reason: reason });
@@ -146,7 +135,6 @@ client.on('messageCreate', async message => {
         }, 2000);
     }
 
-    // إزالة التحذيرات (/شيل)
     if (command === '/شيل') {
         const target = message.mentions.members.first();
         if (!target) return message.reply('منشن الشخص!');
@@ -155,10 +143,9 @@ client.on('messageCreate', async message => {
         message.channel.send(`تم حذف جميع تحذيرات ${target}`);
     }
 
-    // عرض التحذيرات (-تحذيرات)
     if (command === '-تحذيرات') {
         const target = message.mentions.members.first();
-        let msg = await message.channel.send(`جاري التحميل... ${EMOJI_LOAD}`);
+        let msg = await message.channel.send(`تحميل... ${EMOJI_LOAD}`);
         
         setTimeout(() => {
             if (target) {
@@ -180,16 +167,12 @@ client.on('messageCreate', async message => {
         }, 2000);
     }
 
-    // ==========================================
-    // نظام الهوية والتسجيل
-    // ==========================================
-
     if (command === '/هويه') {
         const target = message.mentions.users.first();
         if (!target) return message.reply('منشن الشخص!');
         const userData = db.users[target.id];
         
-        let msg = await message.channel.send(`جاري التحميل... ${EMOJI_LOAD}`);
+        let msg = await message.channel.send(`تحميل... ${EMOJI_LOAD}`);
         setTimeout(() => {
             if (!userData || !userData.phone) return msg.edit('هذا الشخص لا يملك هوية.');
             msg.edit(`**هوية الشخص:**\nالاسم: ${userData.name}\nالرقم الوطني: ${userData.phone}\nالجنس: ${userData.gender === 'boy' ? 'ولد' : 'بنت'}`);
@@ -197,7 +180,7 @@ client.on('messageCreate', async message => {
     }
 
     if (command === '/حذف' && args[1] === 'هويه:') {
-        if (message.author.id !== OWNER_ID) return message.reply('هذا الأمر للملك فقط!');
+        if (message.author.id !== OWNER_ID) return;
         const target = message.mentions.members.first();
         if (!target) return message.reply('منشن الشخص!');
         
@@ -205,20 +188,14 @@ client.on('messageCreate', async message => {
         saveDB();
         
         await target.roles.set([REGISTRATION_ROLE]);
-        message.channel.send(`تم حذف هوية ${target} وإرجاعه لرتبة التسجيل.`);
+        message.channel.send(`تم حذف هوية ${target}`);
     }
 
-    // ==========================================
-    // أوامر التجهيز (أبدأ)
-    // ==========================================
-
+    // أوامر التجهيز
     if (command === '!أبدأ١') {
         message.delete();
         const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('toggle_duty')
-                .setLabel('تسجيل دخول / خروج')
-                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('toggle_duty').setLabel('تسجيل دخول / خروج').setStyle(ButtonStyle.Success),
         );
         message.channel.send({ content: '```yaml\nتسجيل دخول وخروج للعسكر فقط\n```', components: [row] });
     }
@@ -227,24 +204,18 @@ client.on('messageCreate', async message => {
         message.delete();
         db.statusChannel = message.channel.id;
         saveDB();
-        message.channel.send('تم تعيين هذا الروم كبث لتسجيل الدخول والخروج للعسكر (فولدر 11).');
+        message.channel.send('تم تعيين هذا الروم لبث حالة العسكر (فولدر 11).');
     }
 
     if (command === '!أبدأ٣') {
         message.delete();
         const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('start_identity')
-                .setLabel('أكمل')
-                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('start_identity').setLabel('أكمل').setStyle(ButtonStyle.Primary),
         );
         message.channel.send({ content: 'السلام عليكم، لتأكيد دخولك للسيرفر اضغط زر أكمل:', components: [row] });
     }
 
-    // ==========================================
-    // نظام الشنطة والبيع
-    // ==========================================
-
+    // الشنطة والبيع
     if (command === '-شنطه') {
         const user = db.users[message.author.id] || { hunger: 100, thirst: 100, inventory: [] };
         
@@ -261,7 +232,7 @@ client.on('messageCreate', async message => {
     if (command === '/بيع' && args[1] === 'الغرض:') {
         if (!message.member.roles.cache.has(SELLER_ROLE)) return message.reply('ليس لديك رتبة البائع!');
         const target = message.mentions.members.first();
-        const item = args.slice(3).join(' '); // استخراج اسم الغرض
+        const item = args.slice(3).join(' '); 
         
         if (!target || !item) return message.reply('الطريقة الصحيحة: /بيع الغرض: [اسم الغرض] الشخص: @منشن');
         if (!shopItems[item]) return message.reply('هذا الغرض غير موجود في المنيو!');
@@ -284,7 +255,7 @@ client.on('messageCreate', async message => {
     }
 
     if (command === '/فول') {
-        if (message.author.id !== OWNER_ID) return message.reply('للملك فقط!');
+        if (message.author.id !== OWNER_ID) return;
         const target = message.mentions.members.first();
         if (!target) return message.reply('منشن الشخص!');
         
@@ -296,17 +267,15 @@ client.on('messageCreate', async message => {
         message.channel.send(`تم تفويل طاقة ${target} بنجاح.`);
     }
 
-    // نظام الأكل المباشر بكتابة اسم الأكلة
+    // الأكل المباشر
     if (shopItems[message.content]) {
         const item = message.content;
         let user = db.users[message.author.id];
         
         if (user && user.inventory && user.inventory.includes(item)) {
-            // إزالة الغرض من الشنطة
             const itemIndex = user.inventory.indexOf(item);
             user.inventory.splice(itemIndex, 1);
             
-            // زيادة الطاقة
             user.hunger = Math.min(100, user.hunger + shopItems[item].hunger);
             user.thirst = Math.min(100, user.thirst + shopItems[item].thirst);
             saveDB();
@@ -316,9 +285,7 @@ client.on('messageCreate', async message => {
     }
 });
 
-// ==========================================
-// التفاعلات (الأزرار)
-// ==========================================
+// التفاعلات
 client.on('interactionCreate', async interaction => {
     if (!interaction.isButton()) return;
 
@@ -349,7 +316,7 @@ client.on('interactionCreate', async interaction => {
             await dmChannel.send('مرحباً بك في سيرفر رولباك، هل تريد أن تصنع هويتك في السيرفر للمزح واللعب فقط؟ (اكتب نعم أو لا)');
             
             const filter = m => m.author.id === interaction.user.id;
-            const collector = dmChannel.createMessageCollector({ filter, time: 300000 }); // 5 دقائق للتسجيل
+            const collector = dmChannel.createMessageCollector({ filter, time: 300000 });
             
             let step = 0;
             let tempUserData = {};
@@ -367,7 +334,7 @@ client.on('interactionCreate', async interaction => {
                 else if (step === 1) {
                     tempUserData.name = m.content;
                     step++;
-                    m.reply('طيب، هل تريد صنع رقم مزيف للهاتف مزيف 100% للسيرفر؟ إذا نعم اكتب 17 متبوعاً بـ 5 أرقام (مثال: 1712345).');
+                    m.reply('طيب، هل تريد صنع رقم مزيف للهاتف؟ إذا نعم اكتب 17 متبوعاً بـ 5 أرقام (مثال: 1712345).');
                 }
                 else if (step === 2) {
                     const phone = m.content;
@@ -375,7 +342,6 @@ client.on('interactionCreate', async interaction => {
                         return m.reply('غلط! يجب أن يبدأ بـ 17 ويكون طوله 7 أرقام. (لإلغاء العملية اكتب إلغاء)');
                     }
                     
-                    // التحقق إذا كان الرقم مستخدم
                     let isUsed = Object.values(db.users).some(u => u.phone === phone);
                     if (isUsed) return m.reply('هذا الرقم عند شخص آخر! اكتب رقماً جديداً يبدأ بـ 17.');
 
@@ -397,23 +363,21 @@ client.on('interactionCreate', async interaction => {
                     m.reply('مرحباً بك في سيرفر رولباك!');
                     collector.stop();
 
-                    // إعطاء الرتب
                     const member = interaction.guild.members.cache.get(interaction.user.id);
                     if (member) {
                         await member.roles.remove(REGISTRATION_ROLE).catch(()=>{});
                         await member.roles.add(VERIFIED_ROLE).catch(()=>{});
                         if (tempUserData.gender === 'boy') await member.roles.add(BOY_ROLE).catch(()=>{});
-                        else await member.roles.add(GRL_ROLE).catch(()=>{});
+                        else await member.roles.add(GIRL_ROLE).catch(()=>{});
                     }
                 }
             });
         } catch (e) {
-            console.error('لا يمكن إرسال رسالة خاصة لهذا الشخص.');
+            console.error('لا يمكن إرسال رسالة خاصة.');
         }
     }
 });
 
-// دالة لتحديث رسالة البث (فولدر 11)
 async function updateMilitaryStatus(guild) {
     if (!db.statusChannel) return;
     const channel = guild.channels.cache.get(db.statusChannel);
@@ -433,9 +397,7 @@ async function updateMilitaryStatus(guild) {
     let text = [...online, ...offline].join('\n');
     if (!text) text = 'لا يوجد عساكر مسجلين حالياً.';
 
-    // تحديث أو إرسال الرسالة
     channel.send(`**تحديث حالة العساكر:**\n${text}`);
 }
 
-// ضع توكن البوت في ملف .env أو في إعدادات Environment Variables في رندر
 client.login(process.env.DISCORD_TOKEN);
