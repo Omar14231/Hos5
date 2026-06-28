@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import os
 import asyncio
+import json
 from flask import Flask
 from threading import Thread
 
@@ -27,6 +28,7 @@ def keep_alive():
 # 2. الايديات والرتب (Hardcoded)
 # ==========================================
 OWNER_ID = 1306034100544737461
+BACKUP_CHANNEL_ID = 1520532277795356742 # روم الحفظ والداتا
 
 # رتب العسكر والتدريب
 ROLE_ON_DUTY = 1520077188135780494
@@ -50,11 +52,6 @@ CHANNEL_WELCOME = 1520074304447053915
 ROLE_MERCHANT = 1520153220100522126
 ROLE_DEAD = 1520075245308874853
 
-# الايموجيات
-EMOJI_WARN_1 = "<a:emoji_26:1520109726065496295>"
-EMOJI_WARN_2 = "<a:emoji_28:1520109788485128202>"
-EMOJI_LOADING = "<a:emoji_26:1520109763952771204>"
-
 # الاغراض والمخزون
 ITEMS_DB = {
     "برجر": {"hunger": 50, "thirst": 0},
@@ -72,7 +69,7 @@ ITEMS_DB = {
 }
 
 # ==========================================
-# 3. إعدادات البوت والـ Intents
+# 3. إعدادات البوت وقاعدة البيانات (Persistence)
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -86,27 +83,76 @@ db = {
     "used_phones": set(),
     "live_log_msg": None,
     "warnings": [],
-    "registering_users": set() # لمنع التكرار في زر الهوية
+    "registering_users": set()
 }
 
+DB_FILE = "database.json"
+
+def load_db():
+    global db
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            db["users"] = data.get("users", {})
+            db["used_phones"] = set(data.get("used_phones", []))
+            db["live_log_msg"] = data.get("live_log_msg", None)
+            db["warnings"] = data.get("warnings", [])
+            db["registering_users"] = set(data.get("registering_users", []))
+
+def save_db():
+    data = {
+        "users": db["users"],
+        "used_phones": list(db["used_phones"]),
+        "live_log_msg": db["live_log_msg"],
+        "warnings": db["warnings"],
+        "registering_users": list(db["registering_users"])
+    }
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
 def get_user_data(user_id):
-    if user_id not in db["users"]:
-        db["users"][user_id] = {
+    uid = str(user_id) # يجب تحويله لنص بسبب JSON
+    if uid not in db["users"]:
+        db["users"][uid] = {
             "identity": None,
             "hunger": 100,
             "thirst": 100,
-            "health": 100, # نظام الصحة الجديد
+            "health": 100,
             "inventory": {},
             "warnings_count": 0
         }
-    return db["users"][user_id]
+        save_db()
+    return db["users"][uid]
 
 # ==========================================
-# 4. الأحداث ونظام البقاء (الصحة والجوع)
+# 4. الأحداث ونظام البقاء والباك اب
 # ==========================================
 @bot.event
 async def on_ready():
     print(f"تم تسجيل الدخول كـ {bot.user}")
+    
+    # محاولة استرجاع البيانات من روم الحفظ إذا كان الملف محذوفاً
+    if not os.path.exists(DB_FILE):
+        print("ملف البيانات غير موجود محلياً، جاري البحث في روم الداتا...")
+        backup_channel = bot.get_channel(BACKUP_CHANNEL_ID)
+        if backup_channel:
+            async for msg in backup_channel.history(limit=20):
+                if msg.attachments and msg.attachments[0].filename == DB_FILE:
+                    await msg.attachments[0].save(DB_FILE)
+                    print("✅ تم استرجاع قاعدة البيانات من الديسكورد بنجاح!")
+                    break
+    
+    load_db() # تحميل البيانات
+    
+    # التحقق من الأعضاء الذين لا يملكون رتب وإعطائهم رتبة الدخول
+    for guild in bot.guilds:
+        newcomer_role = guild.get_role(ROLE_NEWCOMER)
+        if newcomer_role:
+            for member in guild.members:
+                if not member.bot and len(member.roles) == 1: # يملك @everyone فقط
+                    try: await member.add_roles(newcomer_role)
+                    except: pass
+
     try:
         synced = await bot.tree.sync()
         print(f"تمت مزامنة {len(synced)} أمر Slash.")
@@ -115,6 +161,9 @@ async def on_ready():
     
     if not minute_survival_loop.is_running():
         minute_survival_loop.start()
+        
+    if not backup_db_loop.is_running():
+        backup_db_loop.start()
 
 @bot.event
 async def on_member_join(member):
@@ -122,9 +171,18 @@ async def on_member_join(member):
     if newcomer_role:
         await member.add_roles(newcomer_role)
 
+@tasks.loop(hours=2)
+async def backup_db_loop():
+    """يرسل نسخة احتياطية من البيانات كل ساعتين للروم المخصص"""
+    save_db()
+    channel = bot.get_channel(BACKUP_CHANNEL_ID)
+    if channel and os.path.exists(DB_FILE):
+        with open(DB_FILE, "rb") as f:
+            await channel.send("📂 **نسخة احتياطية تلقائية لقاعدة البيانات (Persistence)**", file=discord.File(f, DB_FILE))
+
 @tasks.loop(minutes=1)
 async def minute_survival_loop():
-    """لوب ينفذ كل دقيقة لنظام البقاء والصحة"""
+    needs_save = False
     for guild in bot.guilds:
         for member in guild.members:
             if member.bot: continue
@@ -132,29 +190,26 @@ async def minute_survival_loop():
             is_active = str(member.status) != "offline" or member.get_role(ROLE_ON_DUTY)
             if is_active:
                 u_data = get_user_data(member.id)
-                # انخفاض الجوع والعطش ببطء (تقريباً 1 كل دقيقة = 60 في الساعة)
+                # انخفاض الجوع والعطش
                 u_data["hunger"] = max(0, u_data["hunger"] - 1)
                 u_data["thirst"] = max(0, u_data["thirst"] - 1)
+                needs_save = True
                 
                 h, t, hp = u_data["hunger"], u_data["thirst"], u_data["health"]
                 
                 # التنبيهات
                 if h == 25 or t == 25:
-                    try: await member.send("⚠️ **تحذير:** أنت جائع أو عطشان. نسبتك وصلت 25%. يرجى الشراء والأكل.")
-                    except: pass
-                elif h == 15 or t == 15:
-                    try: await member.send("🚨 **تحذير خطير:** نسبتك وصلت 15%! كُل أو اشرب فوراً.")
+                    try: await member.send("⚠️ **تحذير:** أنت جائع أو عطشان. نسبتك وصلت 25%.")
                     except: pass
                 elif h == 5 or t == 5:
                     try: await member.send("☠️ **تنبيه أخير:** باقي لك 5 وتروح للتوقيف! تصرف فوراً.")
                     except: pass
 
-                # نظام الصحة (ينقص 2 إذا الجوع والعطش 0)
+                # نظام الصحة 
                 if h == 0 and t == 0:
                     u_data["health"] = max(0, hp - 2)
                     if u_data["health"] == 0:
                         try:
-                            # يعطيه رتبة الميت/التوقيف
                             roles_to_keep = [guild.default_role]
                             if member.get_role(ROLE_MALE): roles_to_keep.append(guild.get_role(ROLE_MALE))
                             if member.get_role(ROLE_FEMALE): roles_to_keep.append(guild.get_role(ROLE_FEMALE))
@@ -164,6 +219,8 @@ async def minute_survival_loop():
                             
                             await member.edit(roles=roles_to_keep)
                         except: pass
+    if needs_save:
+        save_db()
 
 async def update_live_log():
     if not db["live_log_msg"]: return
@@ -191,8 +248,8 @@ async def update_live_log():
 # ==========================================
 class InventoryView(discord.ui.View):
     def __init__(self, user_id, inventory):
-        super().__init__(timeout=15.0) # يختفي بعد 15 ثانية
-        self.user_id = user_id
+        super().__init__(timeout=15.0)
+        self.user_id = str(user_id)
         for item_name, count in inventory.items():
             if count > 0:
                 btn = discord.ui.Button(label=f"{item_name} ({count})", style=discord.ButtonStyle.primary, custom_id=f"use_{item_name}")
@@ -201,14 +258,13 @@ class InventoryView(discord.ui.View):
 
     def create_callback(self, item_name):
         async def callback(interaction: discord.Interaction):
-            if interaction.user.id != self.user_id:
-                return await interaction.response.send_message("❌ هذه الشنطة ليست لك، لا يمكنك استخدامها!", ephemeral=True)
+            if str(interaction.user.id) != self.user_id:
+                return await interaction.response.send_message("❌ هذه الشنطة ليست لك!", ephemeral=True)
             
             u_data = get_user_data(self.user_id)
             if u_data["inventory"].get(item_name, 0) <= 0:
                 return await interaction.response.send_message("لم يعد لديك هذا الغرض.", ephemeral=True)
 
-            # خصم الغرض واستخدامه
             u_data["inventory"][item_name] -= 1
             if u_data["inventory"][item_name] == 0: del u_data["inventory"][item_name]
             
@@ -216,10 +272,11 @@ class InventoryView(discord.ui.View):
             if stats:
                 u_data["hunger"] = min(100, u_data["hunger"] + stats["hunger"])
                 u_data["thirst"] = min(100, u_data["thirst"] + stats["thirst"])
-                u_data["health"] = min(100, u_data["health"] + 5) # ريفريش بسيط للصحة
+                u_data["health"] = min(100, u_data["health"] + 5)
             
+            save_db()
             await interaction.response.send_message(f"🍽️ تم أكل/شرب **{item_name}** بنجاح!", ephemeral=True)
-            self.stop() # يوقف الأزرار بعد الاستخدام لتحديث الشنطة
+            self.stop() 
         return callback
 
 class DutyView(discord.ui.View):
@@ -280,39 +337,35 @@ class RegistrationView(discord.ui.View):
             return await interaction.response.send_message("لقد قمت بالتسجيل مسبقاً أو لا تملك رتبة التسجيل.", ephemeral=True)
         
         if member.id in db["registering_users"]:
-            return await interaction.response.send_message("تم إرسال رسالة لك في الخاص بالفعل! راجع رسائلك وإذا أردت الإلغاء اكتب 'لا' هناك.", ephemeral=True)
+            return await interaction.response.send_message("تم إرسال رسالة لك في الخاص بالفعل!", ephemeral=True)
             
         db["registering_users"].add(member.id)
+        save_db()
         await interaction.response.send_message("تم إرسال رسالة لك في الخاص لإكمال تسجيلك.", ephemeral=True)
         
         try:
-            await member.send("مرحباً بك في سيرفر رولباك! هل تريد أن تصنع هويتك في السيرفر للمزح واللعب فقط؟ (نعم/لا)")
+            await member.send("مرحباً بك في سيرفر رولباك! هل تريد أن تصنع هويتك؟ (نعم/لا)")
             def check(m): return m.author == member and isinstance(m.channel, discord.DMChannel)
             
             resp1 = await bot.wait_for('message', check=check, timeout=120)
             if resp1.content.lower() != 'نعم':
                 db["registering_users"].remove(member.id)
-                return await member.send("تم الإلغاء. يمكنك العودة للسيرفر والضغط على الزر متى ما شئت.")
+                save_db()
+                return await member.send("تم الإلغاء.")
 
             await member.send("حسناً، اكتب اسمك المستعار أو الحقيقي:")
             name_msg = await bot.wait_for('message', check=check, timeout=120)
-            if name_msg.content == "الغاء": 
-                db["registering_users"].remove(member.id)
-                return await member.send("تم الإلغاء.")
             name = name_msg.content
 
             phone = ""
             while True:
-                await member.send("اكتب رقم هاتف مزيف يبدأ بـ 17 مكون من 7 أرقام (مثال: 1712345):")
+                await member.send("اكتب رقم هاتف مزيف يبدأ بـ 17 مكون من 7 أرقام:")
                 phone_msg = await bot.wait_for('message', check=check, timeout=120)
                 phone_input = phone_msg.content.strip()
-                if phone_input == "الغاء":
-                    db["registering_users"].remove(member.id)
-                    return await member.send("تم الإلغاء.")
                 
                 if phone_input.startswith("17") and len(phone_input) == 7:
                     if phone_input in db["used_phones"]:
-                        await member.send("هذا الرقم عند شخص آخر، الرجاء اختيار رقم مختلف.")
+                        await member.send("هذا الرقم محجوز، اختر رقماً آخر.")
                     else:
                         phone = phone_input
                         db["used_phones"].add(phone)
@@ -340,18 +393,18 @@ class RegistrationView(discord.ui.View):
             await member.add_roles(citizen_role, gender_role)
             await member.send(f"تم توثيق هويتك بنجاح.")
             
-            # رسالة الترحيب في الروم المخصص
             welcome_channel = bot.get_channel(CHANNEL_WELCOME)
             if welcome_channel:
                 await welcome_channel.send(f"منور ام السيرفر يا {name} {member.mention}")
                 
             db["registering_users"].remove(member.id)
+            save_db()
             
         except asyncio.TimeoutError:
-            db["registering_users"].discard(member.id)
-            await member.send("انتهى وقت التسجيل. الرجاء الضغط على الزر في السيرفر مرة أخرى.")
-        except discord.Forbidden:
-            db["registering_users"].discard(member.id)
+            if member.id in db["registering_users"]:
+                db["registering_users"].remove(member.id)
+                save_db()
+            await member.send("انتهى وقت التسجيل. اضغط على الزر مجدداً.")
 
 # ==========================================
 # 6. أوامر السيرفر (Slash)
@@ -361,9 +414,6 @@ async def slash_role(interaction: discord.Interaction, member: discord.Member, r
     if not interaction.user.guild_permissions.manage_roles and interaction.user.id != OWNER_ID:
         return await interaction.response.send_message("لا تملك صلاحية.", ephemeral=True)
         
-    if role.permissions.administrator or role.permissions.manage_guild or role.permissions.ban_members:
-        return await interaction.response.send_message("هذه رتبة إدارية عليا، ممنوع.", ephemeral=True)
-
     try:
         if role in member.roles:
             await member.remove_roles(role)
@@ -372,17 +422,7 @@ async def slash_role(interaction: discord.Interaction, member: discord.Member, r
             await member.add_roles(role)
             await interaction.response.send_message(f"تم إعطاء رتبة {role.name} لـ {member.mention}.")
     except discord.Forbidden:
-        await interaction.response.send_message("حدث خطأ! رتبة البوت أقل من الرتبة المراد إعطاؤها. ارفع رتبة البوت في الإعدادات.", ephemeral=True)
-
-@bot.tree.command(name="حبس", description="حجز/حبس شخص")
-async def jail(interaction: discord.Interaction, member: discord.Member):
-    military_role = interaction.guild.get_role(ROLE_MILITARY)
-    if military_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("للعسكر فقط.", ephemeral=True)
-        
-    jail_role = interaction.guild.get_role(ROLE_JAIL)
-    await member.add_roles(jail_role)
-    await interaction.response.send_message(f"تم حبس {member.mention} بنجاح.")
+        await interaction.response.send_message("حدث خطأ بصلاحيات البوت.", ephemeral=True)
 
 @bot.tree.command(name="تفتيش", description="تفتيش شنطة شخص (للعسكر)")
 async def search_inv(interaction: discord.Interaction, member: discord.Member):
@@ -397,11 +437,35 @@ async def search_inv(interaction: discord.Interaction, member: discord.Member):
     
     await interaction.response.send_message(f"🎒 **تفتيش شنطة {member.display_name}:**\n{items_str}")
 
-@bot.tree.command(name="شنطه", description="عرض مخزونك واستخدام الأغراض")
-async def slash_inventory(interaction: discord.Interaction):
-    u_data = get_user_data(interaction.user.id)
-    h, t, hp = u_data["hunger"], u_data["thirst"], u_data["health"]
+@bot.tree.command(name="شنطه", description="عرض مخزونك أو إهداء غرض لشخص آخر")
+@app_commands.describe(اهداء="اسم الغرض الذي تريد إهداءه", شخص="الشخص الذي تريد أن تعطيه الغرض")
+async def slash_inventory(interaction: discord.Interaction, اهداء: str = None, شخص: discord.Member = None):
+    user_id = str(interaction.user.id)
+    u_data = get_user_data(user_id)
     
+    # في حالة وجود إهداء
+    if اهداء and شخص:
+        if اهداء not in u_data["inventory"] or u_data["inventory"][اهداء] <= 0:
+            return await interaction.response.send_message(f"❌ أنت لا تملك **{اهداء}** في شنطتك لإهدائه!", ephemeral=True)
+            
+        if شخص.bot:
+            return await interaction.response.send_message("❌ لا يمكنك إهداء البوتات!", ephemeral=True)
+            
+        # خصم من المرسل
+        u_data["inventory"][اهداء] -= 1
+        if u_data["inventory"][اهداء] == 0:
+            del u_data["inventory"][اهداء]
+            
+        # إضافة للمستلم
+        target_id = str(شخص.id)
+        t_data = get_user_data(target_id)
+        t_data["inventory"][اهداء] = t_data["inventory"].get(اهداء, 0) + 1
+        
+        save_db() # حفظ التغييرات في قاعدة البيانات
+        return await interaction.response.send_message(f"🎁 تم إهداء **{اهداء}** بنجاح إلى {شخص.mention}!")
+
+    # في حالة عدم وجود إهداء (عرض الشنطة فقط)
+    h, t, hp = u_data["hunger"], u_data["thirst"], u_data["health"]
     def get_bar(val, color_emoji):
         filled = int((val / 100) * 10)
         return color_emoji * filled + "⬛" * (10 - filled)
@@ -412,121 +476,46 @@ async def slash_inventory(interaction: discord.Interaction):
     embed.add_field(name="العطش", value=f"{t}% {get_bar(t, '🟦')}", inline=False)
     
     view = InventoryView(interaction.user.id, u_data["inventory"])
-    
     await interaction.response.send_message(embed=embed, view=view)
     
-    # حذف الرسالة بعد 15 ثانية للتنظيف
     await asyncio.sleep(15)
     try: await interaction.delete_original_response()
     except: pass
-
-@bot.tree.command(name="هويه", description="عرض هوية شخص (للعسكر)")
-async def identity(interaction: discord.Interaction, member: discord.Member):
-    military_role = interaction.guild.get_role(ROLE_MILITARY)
-    if military_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("هذا الأمر للعسكر فقط.", ephemeral=True)
-        
-    u_data = get_user_data(member.id)
-    idt = u_data.get("identity")
-    if not idt: return await interaction.response.send_message("هذا الشخص ليس لديه هوية.")
-        
-    embed = discord.Embed(title=f"هوية: {idt['name']}", color=discord.Color.dark_theme())
-    embed.add_field(name="الرقم الوطني", value=idt['phone'], inline=True)
-    embed.add_field(name="الجنس", value=idt['gender'], inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="دخول", description="الموافقة/الرفض على دخول شخص (للعسكر)")
-@app_commands.choices(choice=[
-    app_commands.Choice(name="نعم", value="yes"),
-    app_commands.Choice(name="لا", value="no")
-])
-async def enter_cmd(interaction: discord.Interaction, choice: app_commands.Choice[str], member: discord.Member):
-    military_role = interaction.guild.get_role(ROLE_MILITARY)
-    if military_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("للعسكر فقط.", ephemeral=True)
-        
-    enter_role = interaction.guild.get_role(ROLE_ENTER)
-    if choice.value == "yes":
-        await member.add_roles(enter_role)
-        await interaction.response.send_message(f"تم الموافقة لـ {member.mention} وإعطاؤه الرتبة.")
-    else:
-        if enter_role in member.roles: await member.remove_roles(enter_role)
-        await interaction.response.send_message(f"تم رفض دخول {member.mention} (وسحب الرتبة إن وجدت).")
-
-@bot.tree.command(name="انهاء", description="إنهاء تدريب عسكري")
-async def finish_training(interaction: discord.Interaction, member: discord.Member):
-    trainer_role = interaction.guild.get_role(ROLE_TRAINER)
-    if trainer_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("هذا الأمر للمدربين فقط.", ephemeral=True)
-        
-    trainee_role = interaction.guild.get_role(ROLE_TRAINEE)
-    if trainee_role not in member.roles:
-        return await interaction.response.send_message("هذا الشخص ليس لديه رتبة متدرب.", ephemeral=True)
-        
-    await member.remove_roles(trainee_role)
-    await member.add_roles(interaction.guild.get_role(ROLE_MILITARY), interaction.guild.get_role(ROLE_SOLDIER))
-    
-    await interaction.response.send_message(f"🎉 تم إنهاء تدريب {member.mention} وتخريجه كجندي عسكري!")
-
-@bot.tree.command(name="منيو", description="عرض قائمة المتجر")
-async def menu(interaction: discord.Interaction):
-    merchant_role = interaction.guild.get_role(ROLE_MERCHANT)
-    if merchant_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("فقط التجار يمكنهم رؤية/كتابة المنيو.", ephemeral=True)
-        
-    embed = discord.Embed(title="🛒 قائمة المتجر", color=discord.Color.purple())
-    for item, stats in ITEMS_DB.items():
-        desc = []
-        if stats["hunger"] > 0: desc.append(f"+{stats['hunger']} جوع")
-        if stats["thirst"] > 0: desc.append(f"+{stats['thirst']} عطش")
-        embed.add_field(name=item, value=" | ".join(desc), inline=True)
-        
-    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="بيع", description="للتجار فقط: بيع غرض لشخص")
 async def sell(interaction: discord.Interaction, item: str, member: discord.Member):
     merchant_role = interaction.guild.get_role(ROLE_MERCHANT)
     if merchant_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("فقط التجار يمكنهم استخدام هذا الأمر.", ephemeral=True)
+        return await interaction.response.send_message("فقط التجار.", ephemeral=True)
         
     if item not in ITEMS_DB:
-        return await interaction.response.send_message("الغرض غير موجود في المنيو.", ephemeral=True)
+        return await interaction.response.send_message("الغرض غير موجود.", ephemeral=True)
         
     t_data = get_user_data(member.id)
     t_data["inventory"][item] = t_data["inventory"].get(item, 0) + 1
-    await interaction.response.send_message(f"✅ تم بيع {item} وإضافته في شنطة {member.mention}.")
-
-@bot.tree.command(name="فول", description="للملك فقط: تعبئة الجوع والعطش والصحة")
-async def full(interaction: discord.Interaction, member: discord.Member):
-    if interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("هذا الأمر للملك فقط.", ephemeral=True)
-        
-    u_data = get_user_data(member.id)
-    u_data["hunger"] = 100
-    u_data["thirst"] = 100
-    u_data["health"] = 100
-    await interaction.response.send_message(f"تم تعبئة الجوع والعطش والصحة إلى 100% لـ {member.mention}.")
+    save_db()
+    await interaction.response.send_message(f"✅ تم بيع {item} لـ {member.mention}.")
 
 # ==========================================
-# 7. أوامر التجهيزات الإدارية (!أبدأ)
+# 7. أوامر التجهيزات الإدارية (!أبدأ) - للملك فقط
 # ==========================================
 @bot.command(name="أبدأ٣")
 async def start3(ctx):
-    if not ctx.author.guild_permissions.administrator and ctx.author.id != OWNER_ID: return
+    if ctx.author.id != OWNER_ID: return # للملك فقط
     await ctx.message.delete()
     embed = discord.Embed(title="التحقق من الهوية", description="السلام عليكم، تأكيد دخولك للسيرفر. اضغط زر أكمل للبدء.", color=discord.Color.gold())
     await ctx.send(embed=embed, view=RegistrationView())
 
 @bot.command(name="أبدأ٤")
 async def start4(ctx):
-    if ctx.author.id != OWNER_ID: return
+    if ctx.author.id != OWNER_ID: return # للملك فقط
     await ctx.message.delete()
     embed = discord.Embed(title="التوثيق", description="هل تريد التوثيق؟", color=discord.Color.blue())
     await ctx.send(embed=embed, view=VerifyView())
 
 @bot.command(name="أبدأ٥")
 async def start5(ctx):
-    if ctx.author.id != OWNER_ID: return
+    if ctx.author.id != OWNER_ID: return # للملك فقط
     await ctx.message.delete()
     embed = discord.Embed(title="التجنيد العسكري", description="مرحبا بكم هل تريدو ان تكون جندي عسكري\nاضغط الزر وا سا ندربك بشكل افضل وا كبير جدا", color=discord.Color.dark_red())
     await ctx.send(embed=embed, view=TraineeView())
