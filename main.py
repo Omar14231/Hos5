@@ -1,393 +1,746 @@
+"""
+Rollback RP Discord Bot - main.py
+Hosted on Render with Flask keep-alive thread.
+All persistence via database.json.
+"""
+
 import discord
-from discord.ext import commands, tasks
 from discord import app_commands
+from discord.ext import commands
+import json
 import os
 import random
-import json
 import asyncio
+import threading
 from flask import Flask
-from threading import Thread
+from datetime import datetime
 
-# ==========================================
-# 1. خادم الويب لمنع خمول البوت على Render
-# ==========================================
-app = Flask(__name__)
+# ─────────────────────────────────────────────
+#  FLASK KEEP-ALIVE (prevents Render sleeping)
+# ─────────────────────────────────────────────
+app_flask = Flask(__name__)
 
-@app.route('/')
+@app_flask.route("/")
 def home():
-    return "البوت يعمل بنجاح وبثبات 100%!"
+    return "Rollback Bot is alive!", 200
 
-def run_server():
+def run_flask():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    app_flask.run(host="0.0.0.0", port=port)
 
 def keep_alive():
-    t = Thread(target=run_server)
+    t = threading.Thread(target=run_flask, daemon=True)
     t.start()
 
-# ==========================================
-# 2. الإعدادات والمعطيات الثابتة (IDs)
-# ==========================================
-OWNER_ID = 1306034100544737461
-ADMIN_ROLE_ID = 1521183344430153849  # رتبة الإدارة لحذف الهوية
+# ─────────────────────────────────────────────
+#  HARDCODED IDs & CONSTANTS
+# ─────────────────────────────────────────────
+OWNER_ID               = 1306034100544737461
+ADMIN_ROLE_ID          = 1521183344430153849
+MILITARY_ON_DUTY_ID    = 1520077188135780494
+MILITARY_OFF_DUTY_ID   = 1520084329714421800
+NEWCOMER_ROLE_ID       = 1520087730544050436
+CITIZEN_ROLE_ID        = 1474724032849907722
+MALE_ROLE_ID           = 1476903628714410079
+FEMALE_ROLE_ID         = 1476903782112821258
 
-# رتب العسكر
-ROLE_MILITARY = 1520077188135780494  # رتبة عسكري
-ROLE_ON_DUTY = 1520077188135780494   # عسكري متصل
-ROLE_OFF_DUTY = 1520084329714421800  # عسكري غير متصل
-
-# رتب المواطنين والتسجيل
-ROLE_NEWCOMER = 1520087730544050436  # رتبة الدخول والجدد
-ROLE_CITIZEN = 1474724032849907722   # رتبة مواطن
-ROLE_MALE = 1476903628714410079      # رتبة ولد
-ROLE_FEMALE = 1476903782112821258    # رتبة بنت
-
-# إيموجيات التحذير والتحميل المخصصة
-EMOJI_WARN1 = "<a:emoji_26:1520109726065496295>"
-EMOJI_WARN2 = "<a:emoji_28:1520109788485128202>"
+EMOJI_WARN1  = "<a:emoji_26:1520109726065496295>"
+EMOJI_WARN2  = "<a:emoji_28:1520109788485128202>"
 EMOJI_LOADING = "<a:emoji_26:1520109763952771204>"
 
-# ==========================================
-# 3. إعدادات البوت وقاعدة البيانات المحلية
-# ==========================================
+DB_FILE = "database.json"
+
+# ─────────────────────────────────────────────
+#  DATABASE HELPERS
+# ─────────────────────────────────────────────
+def load_db() -> dict:
+    if not os.path.exists(DB_FILE):
+        return {}
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+def save_db(data: dict):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_section(key: str) -> dict:
+    db = load_db()
+    return db.get(key, {})
+
+def set_section(key: str, value):
+    db = load_db()
+    db[key] = value
+    save_db(db)
+
+def generate_unique_id() -> str:
+    """Generate a unique 7-digit national ID starting with '17'."""
+    db = load_db()
+    identities = db.get("identities", {})
+    existing_ids = {v.get("national_id") for v in identities.values()}
+    while True:
+        suffix = random.randint(10000, 99999)
+        candidate = f"17{suffix}"
+        if candidate not in existing_ids:
+            return candidate
+
+# ─────────────────────────────────────────────
+#  BOT SETUP
+# ─────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="-", intents=intents)
+bot = commands.Bot(command_prefix=["!", "-"], intents=intents)
+bot.remove_command("help")
 
-# قاعدة بيانات لحفظ الهويات والتحذيرات وروم البث المباشر
-DB_FILE = "database.json"
-db = {"users": {}, "warnings_log": [], "live_log_msg": None}
+# ─────────────────────────────────────────────
+#  PERMISSION HELPERS
+# ─────────────────────────────────────────────
+def is_owner(user: discord.Member) -> bool:
+    return user.id == OWNER_ID
 
-def load_db():
-    global db
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            db = json.load(f)
-    if "users" not in db: db["users"] = {}
-    if "warnings_log" not in db: db["warnings_log"] = []
-    if "live_log_msg" not in db: db["live_log_msg"] = None
+def has_military_on_duty(user: discord.Member) -> bool:
+    return any(r.id == MILITARY_ON_DUTY_ID for r in user.roles)
 
-def save_db():
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=4)
+def has_military_any(user: discord.Member) -> bool:
+    return any(r.id in (MILITARY_ON_DUTY_ID, MILITARY_OFF_DUTY_ID) for r in user.roles)
 
-def generate_unique_id():
-    while True:
-        num = random.randint(1000000, 9999999)
-        num_str = f"17{str(num)[2:]}" # ضمان البداية بـ 17 وطول 7 أرقام
-        exists = any(u.get("national_id") == num_str for u in db["users"].values())
-        if not exists:
-            return num_str
+def has_admin_role(user: discord.Member) -> bool:
+    return any(r.id == ADMIN_ROLE_ID for r in user.roles)
 
-# ==========================================
-# 4. واجهات التفاعل والأزرار (UI / Modals)
-# ==========================================
+def can_moderate(user: discord.Member) -> bool:
+    return is_owner(user) or has_military_on_duty(user) or has_admin_role(user)
 
-# نافذة إدخال الهوية الكاملة (Modal) التي تظهر على الشاشة
-class IdentityModal(discord.ui.Modal, title="استمارة الهوية الوطنية - سيرفر رولباك"):
-    name_input = discord.ui.TextInput(label="الاسم الكامل أو المستعار", placeholder="مثال: ابو احمد", min_length=3, max_length=30)
-    age_input = discord.ui.TextInput(label="العمر", placeholder="مثال: 22", min_length=2, max_length=2)
-    nationality_input = discord.ui.TextInput(label="الجنسية (من وين؟)", placeholder="مثال: سعودي", min_length=3, max_length=20)
-    gender_input = discord.ui.TextInput(label="الجنس (ولد أو بنت)", placeholder="اكتب: ولد أو بنت", min_length=3, max_length=3)
+# ─────────────────────────────────────────────
+#  LIVE SURVEILLANCE LOG UPDATER
+# ─────────────────────────────────────────────
+async def update_surveillance_log(guild: discord.Guild):
+    """Edit the surveillance embed with current military duty statuses."""
+    db = load_db()
+    log_info = db.get("surveillance_log", {})
+    channel_id = log_info.get("channel_id")
+    message_id = log_info.get("message_id")
+    if not channel_id or not message_id:
+        return
+
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        return
+
+    try:
+        msg = await channel.fetch_message(int(message_id))
+    except (discord.NotFound, discord.HTTPException):
+        return
+
+    identities = db.get("identities", {})
+    on_duty_role  = guild.get_role(MILITARY_ON_DUTY_ID)
+    off_duty_role = guild.get_role(MILITARY_OFF_DUTY_ID)
+
+    on_duty_members  = set(m.id for m in (on_duty_role.members  if on_duty_role  else []))
+    off_duty_members = set(m.id for m in (off_duty_role.members if off_duty_role else []))
+    all_military = on_duty_members | off_duty_members
+
+    lines = []
+    for uid in all_military:
+        uid_str = str(uid)
+        rp_name = identities.get(uid_str, {}).get("name", f"<@{uid}>")
+        if uid in on_duty_members:
+            lines.append(f"**{rp_name}** متصل 🟢")
+        else:
+            lines.append(f"**{rp_name}** غير متصل 🔴")
+
+    description = "\n".join(lines) if lines else "لا يوجد أفراد عسكريون مسجلون حالياً."
+
+    embed = discord.Embed(
+        title="البث المراقب لتسجيلات الدخول والخروج",
+        description=description,
+        color=discord.Color.dark_blue(),
+        timestamp=datetime.utcnow()
+    )
+    embed.set_footer(text="آخر تحديث")
+
+    try:
+        await msg.edit(embed=embed)
+    except discord.HTTPException:
+        pass
+
+# ─────────────────────────────────────────────
+#  PERSISTENT VIEW: DUTY TOGGLE  (System 1)
+# ─────────────────────────────────────────────
+class DutyToggleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="تسجيل دخول وا خروج",
+        style=discord.ButtonStyle.success,
+        custom_id="duty_toggle_btn"
+    )
+    async def duty_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        on_duty_role  = interaction.guild.get_role(MILITARY_ON_DUTY_ID)
+        off_duty_role = interaction.guild.get_role(MILITARY_OFF_DUTY_ID)
+
+        has_on  = any(r.id == MILITARY_ON_DUTY_ID  for r in member.roles)
+        has_off = any(r.id == MILITARY_OFF_DUTY_ID for r in member.roles)
+
+        if not has_on and not has_off:
+            await interaction.response.send_message(
+                "❌ هذا الزر مخصص للأفراد العسكريين فقط.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        if has_off:
+            if off_duty_role:
+                await member.remove_roles(off_duty_role)
+            if on_duty_role:
+                await member.add_roles(on_duty_role)
+            await interaction.followup.send("✅ تم تسجيل دخول بنجاح", ephemeral=True)
+        else:
+            if on_duty_role:
+                await member.remove_roles(on_duty_role)
+            if off_duty_role:
+                await member.add_roles(off_duty_role)
+            await interaction.followup.send("✅ تم تسجيل خروج بنجاح", ephemeral=True)
+
+        await update_surveillance_log(interaction.guild)
+
+
+# ─────────────────────────────────────────────
+#  PERSISTENT VIEW: REGISTRATION BUTTON  (System 3)
+# ─────────────────────────────────────────────
+class RegistrationView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="تسجيل الهوية",
+        style=discord.ButtonStyle.primary,
+        custom_id="registration_btn",
+        emoji="📋"
+    )
+    async def open_registration(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        has_newcomer = any(r.id == NEWCOMER_ROLE_ID for r in member.roles)
+        if not has_newcomer:
+            await interaction.response.send_message(
+                "❌ هذا الزر مخصص للأعضاء الجدد فقط.", ephemeral=True
+            )
+            return
+        db = load_db()
+        if str(member.id) in db.get("identities", {}):
+            await interaction.response.send_message(
+                "⚠️ لديك هوية مسجلة بالفعل.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(RegistrationModal())
+
+
+class RegistrationModal(discord.ui.Modal, title="نموذج تسجيل الهوية"):
+    rp_name = discord.ui.TextInput(
+        label="الاسم",
+        placeholder="أدخل اسمك داخل اللعبة",
+        required=True,
+        max_length=50
+    )
+    age = discord.ui.TextInput(
+        label="العمر",
+        placeholder="أدخل عمرك",
+        required=True,
+        max_length=3
+    )
+    nationality = discord.ui.TextInput(
+        label="الجنسية",
+        placeholder="أدخل جنسيتك",
+        required=True,
+        max_length=30
+    )
+    gender = discord.ui.TextInput(
+        label="الجنس (ذكر أو انثى)",
+        placeholder="ذكر أو انثى",
+        required=True,
+        max_length=10
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        
-        gender_text = self.gender_input.value.strip()
-        if gender_text not in ["ولد", "بنت"]:
-            return await interaction.followup.send("❌ خطأ: يجب كتابة 'ولد' أو 'بنت' فقط في خانة الجنس. أعد المحاولة.", ephemeral=True)
-            
-        national_id = generate_unique_id()
-        user_id = str(interaction.user.id)
-        
-        db["users"][user_id] = {
-            "name": self.name_input.value.strip(),
-            "age": self.age_input.value.strip(),
-            "nationality": self.nationality_input.value.strip(),
-            "gender": gender_text,
-            "national_id": national_id,
-            "warnings": db["users"].get(user_id, {}).get("warnings", [])
-        }
-        save_db()
-        
-        # إدارة الرتب تلقائياً
-        guild = interaction.guild
+        await interaction.response.defer(ephemeral=True)
         member = interaction.user
-        
-        newcomer_role = guild.get_role(ROLE_NEWCOMER)
-        citizen_role = guild.get_role(ROLE_CITIZEN)
-        gender_role = guild.get_role(ROLE_MALE if gender_text == "ولد" else ROLE_FEMALE)
-        
-        if newcomer_role: await member.remove_roles(newcomer_role)
-        roles_to_add = [r for r in [citizen_role, gender_role] if r]
-        if roles_to_add: await member.add_roles(*roles_to_add)
-        
-        embed = discord.Embed(title="✅ تم إصدار هويتك بنجاح", color=discord.Color.green())
-        embed.add_field(name="الاسم المستعار", value=self.name_input.value, inline=True)
-        embed.add_field(name="الرقم الوطني", value=f"||{national_id}||", inline=True)
-        embed.add_field(name="الجنسية", value=self.nationality_input.value, inline=True)
+        guild  = interaction.guild
+
+        gender_input = self.gender.value.strip()
+        if gender_input not in ("ذكر", "انثى"):
+            await interaction.followup.send(
+                "❌ الجنس يجب أن يكون **ذكر** أو **انثى** فقط.", ephemeral=True
+            )
+            return
+
+        national_id = generate_unique_id()
+
+        db = load_db()
+        identities = db.get("identities", {})
+        identities[str(member.id)] = {
+            "name":        self.rp_name.value.strip(),
+            "age":         self.age.value.strip(),
+            "nationality": self.nationality.value.strip(),
+            "gender":      gender_input,
+            "national_id": national_id,
+            "registered_at": datetime.utcnow().isoformat()
+        }
+        db["identities"] = identities
+        save_db(db)
+
+        newcomer_role = guild.get_role(NEWCOMER_ROLE_ID)
+        citizen_role  = guild.get_role(CITIZEN_ROLE_ID)
+        male_role     = guild.get_role(MALE_ROLE_ID)
+        female_role   = guild.get_role(FEMALE_ROLE_ID)
+
+        roles_to_remove = [r for r in [newcomer_role] if r and r in member.roles]
+        roles_to_add    = [r for r in [citizen_role] if r]
+        if gender_input == "ذكر" and male_role:
+            roles_to_add.append(male_role)
+        elif gender_input == "انثى" and female_role:
+            roles_to_add.append(female_role)
+
+        try:
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove)
+            if roles_to_add:
+                await member.add_roles(*roles_to_add)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "⚠️ تم تسجيل بياناتك لكن البوت لا يملك صلاحية تعديل أدوارك.", ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="✅ تم تسجيل هويتك بنجاح!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="الاسم",       value=self.rp_name.value.strip(), inline=True)
+        embed.add_field(name="الرقم الوطني", value=national_id,               inline=True)
+        embed.add_field(name="العمر",        value=self.age.value.strip(),     inline=True)
+        embed.add_field(name="الجنسية",      value=self.nationality.value.strip(), inline=True)
+        embed.add_field(name="الجنس",        value=gender_input,               inline=True)
+        embed.set_footer(text="مرحباً بك في Rollback RP!")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-class Start3View(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="أكمل تسجيل الهوية 📋", style=discord.ButtonStyle.primary, custom_id="start_id_modal")
-    async def complete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(IdentityModal())
 
-# نظام الحضور والانصراف (أبدأ 1)
-class DutyView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="تسجيل دخول / خروج 🪪", style=discord.ButtonStyle.success, custom_id="duty_toggle")
-    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        on_duty = interaction.guild.get_role(ROLE_ON_DUTY)
-        off_duty = interaction.guild.get_role(ROLE_OFF_DUTY)
-        
-        if on_duty in member.roles:
-            await member.remove_roles(on_duty)
-            if off_duty: await member.add_roles(off_duty)
-            await interaction.response.send_message("🟢 تم تسجيل خروجك بنجاح وتحويلك للحالة غير متصل.", ephemeral=True)
-        elif off_duty in member.roles or len(member.roles) > 1:
-            if off_duty in member.roles: await member.remove_roles(off_duty)
-            if on_duty: await member.add_roles(on_duty)
-            await interaction.response.send_message("🟢 تم تسجيل دخولك بنجاح وتحويلك للحالة متصل وبدء الخدمة.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ ليس لديك الرتب العسكرية اللازمة لتسجيل الدخول.", ephemeral=True)
-        
-        await update_live_log(interaction.guild)
-
-async def update_live_log(guild):
-    if not db.get("live_log_msg"): return
-    ch_id, msg_id = db["live_log_msg"]
-    try:
-        channel = guild.get_channel(ch_id)
-        msg = await channel.fetch_message(msg_id)
-        on_duty_role = guild.get_role(ROLE_ON_DUTY)
-        
-        lines = []
-        for m in guild.members:
-            if m.bot: continue
-            if m.get_role(ROLE_ON_DUTY) or m.get_role(ROLE_OFF_DUTY):
-                u_data = db["users"].get(str(m.id), {})
-                name = u_data.get("name", m.display_name)
-                status = "متصل 🟢" if on_duty_role in m.roles else "غير متصل 🔴"
-                lines.append(f"**{name}** {status}")
-                
-        if not lines: lines.append("لا يوجد عساكر مسجلين حالياً.")
-        embed = discord.Embed(title="البث المراقب لتسجيلات الدخول والخروج العسكرية", description="\n".join(lines), color=discord.Color.blue())
-        await msg.edit(embed=embed)
-    except: pass
-
-# ==========================================
-# 5. أحداث البوت (Events)
-# ==========================================
+# ─────────────────────────────────────────────
+#  BOT EVENTS
+# ─────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    load_db()
-    print(f"تم تشغيل البوت بنجاح كـ: {bot.user.name}")
+    # Re-register persistent views so buttons survive restarts
+    bot.add_view(DutyToggleView())
+    bot.add_view(RegistrationView())
+
     try:
         synced = await bot.tree.sync()
-        print(f"تمت مزامنة {len(synced)} أمر Slash بنجاح.")
+        print(f"[BOT] Synced {len(synced)} slash command(s).")
     except Exception as e:
-        print(f"خطأ بمزامنة السلاش: {e}")
+        print(f"[BOT] Slash sync error: {e}")
 
+    print(f"[BOT] Logged in as {bot.user} (ID: {bot.user.id})")
+
+
+# ─────────────────────────────────────────────
+#  SETUP COMMANDS  (!أبدأ١ / !أبدأ٢ / !أبدأ٣)
+# ─────────────────────────────────────────────
 @bot.event
-async def on_member_join(member):
-    newcomer_role = member.guild.get_role(ROLE_NEWCOMER)
-    if newcomer_role: await member.add_roles(newcomer_role)
-
-# ==========================================
-# 6. الأوامر العادية والمودريشن (Prefix Commands)
-# ==========================================
-
-@bot.command(name="رول")
-async def give_role(ctx, member: discord.Member = None, role: discord.Role = None):
-    # التحقق من رتبة العسكري أو الأونر
-    military_role = ctx.guild.get_role(ROLE_MILITARY)
-    if military_role not in ctx.author.roles and ctx.author.id != OWNER_ID:
+async def on_message(message: discord.Message):
+    if message.author.bot:
         return
-        
-    if not member or not role:
-        return await ctx.send("اكتب الأمر بطريقة هذه: -رول @الشخص @الرتبة")
-        
-    # فحص الرتب القوية جداً لحماية السيرفر
-    if role.permissions.administrator or role.permissions.manage_guild or role.permissions.manage_roles:
-        return await ctx.send(f"انتبه ترا في رتبه قويه انت بتعطيه ايه ({role.name}) تم الغاء العمليه لحماية السيرفر.")
+
+    content = message.content.strip()
+
+    # ── !أبدأ١  (Duty Toggle System) ──────────────────────────
+    if content == "!أبدأ١":
+        if message.author.id != OWNER_ID:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+        embed = discord.Embed(
+            title="🪖 نظام تسجيل الدوام العسكري",
+            description="اضغط على الزر أدناه لتسجيل الدخول أو الخروج من الدوام.",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Rollback RP • Military System")
+        await message.channel.send(embed=embed, view=DutyToggleView())
+        return
+
+    # ── !أبدأ٢  (Live Surveillance Log) ───────────────────────
+    if content == "!أبدأ٢":
+        if message.author.id != OWNER_ID:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+        embed = discord.Embed(
+            title="البث المراقب لتسجيلات الدخول والخروج",
+            description="جاري التحميل...",
+            color=discord.Color.dark_blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text="آخر تحديث")
+        sent = await message.channel.send(embed=embed)
+
+        db = load_db()
+        db["surveillance_log"] = {
+            "channel_id": str(message.channel.id),
+            "message_id": str(sent.id)
+        }
+        save_db(db)
+
+        await update_surveillance_log(message.guild)
+        return
+
+    # ── !أبدأ٣  (Identity & Registration System) ──────────────
+    if content == "!أبدأ٣":
+        if message.author.id != OWNER_ID:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+        embed = discord.Embed(
+            title="📋 نظام تسجيل الهوية",
+            description=(
+                "مرحباً بك في **Rollback RP**!\n\n"
+                "اضغط على الزر أدناه لتسجيل هويتك في اللعبة وإنشاء شخصيتك الخاصة.\n\n"
+                "⚠️ **ملاحظة:** هذا الزر مخصص للأعضاء الجدد فقط."
+            ),
+            color=discord.Color.blurple()
+        )
+        embed.set_footer(text="Rollback RP • Identity System")
+        await message.channel.send(embed=embed, view=RegistrationView())
+        return
+
+    await bot.process_commands(message)
+
+
+# ─────────────────────────────────────────────
+#  PREFIX COMMAND: -رول  (Role Toggle)
+# ─────────────────────────────────────────────
+@bot.command(name="رول")
+async def role_toggle(ctx: commands.Context, member: discord.Member = None, role: discord.Role = None):
+    if not can_moderate(ctx.author):
+        await ctx.send("❌ ليس لديك صلاحية استخدام هذا الأمر.")
+        return
+
+    if member is None or role is None:
+        await ctx.send("❌ الاستخدام الصحيح: `-رول @العضو @الرتبة`")
+        return
+
+    # Security check: dangerous permissions
+    dangerous = (
+        role.permissions.administrator or
+        role.permissions.manage_guild or
+        role.permissions.manage_roles
+    )
+    if dangerous:
+        await ctx.send(
+            f"⛔ لا يمكن إعطاء أو إزالة الرتبة **{role.name}** لأنها تحتوي على صلاحيات خطيرة."
+        )
+        return
+
+    loading_msg = await ctx.send(f"{EMOJI_LOADING} جاري التنفيذ...")
 
     try:
         if role in member.roles:
             await member.remove_roles(role)
-            await ctx.send(f"تم ازالة الرتبة {role.name} من الشخص بنجاح.")
+            action = f"تم إزالة رتبة **{role.name}** من {member.mention} ✅"
         else:
             await member.add_roles(role)
-            await ctx.send(f"تم اعطاء الرتبة {role.name} للشخص بنجاح.")
+            action = f"تم إعطاء رتبة **{role.name}** لـ {member.mention} ✅"
+        await loading_msg.edit(content=action)
     except discord.Forbidden:
-        await ctx.send("حدث خطأ، لا أملك صلاحية كافية للتحكم بهذه الرتبة.")
+        await loading_msg.edit(content="❌ البوت لا يملك صلاحية تعديل هذه الرتبة.")
+    except discord.HTTPException as e:
+        await loading_msg.edit(content=f"❌ حدث خطأ: {e}")
 
+
+# ─────────────────────────────────────────────
+#  PREFIX COMMAND: -تحذيرات  (View Warnings)
+# ─────────────────────────────────────────────
 @bot.command(name="تحذيرات")
-async def show_warnings(ctx, member: discord.Member = None):
-    await ctx.send(f"{EMOJI_LOADING} جاري التحميل وعرض السجلات...")
-    await asyncio.sleep(1)
-    
+async def view_warnings(ctx: commands.Context, member: discord.Member = None):
+    db = load_db()
+    warnings_db = db.get("warnings", {})
+
     if member:
-        # عرض تحذيرات شخص معين
-        user_id = str(member.id)
-        user_data = db["users"].get(user_id, {})
-        user_warns = user_data.get("warnings", [])
-        
+        user_warns = warnings_db.get(str(member.id), [])
         if not user_warns:
-            return await ctx.send(f"هذا الشخص ليس له أي تحذيرات مسبقة، حسابه نظيف 100%.")
-            
-        embed = discord.Embed(title=f"سجل تحذيرات الشخص: {member.display_name}", color=discord.Color.red())
+            await ctx.send(f"✅ {member.mention} لا يوجد لديه أي تحذيرات.")
+            return
+        embed = discord.Embed(
+            title=f"⚠️ تحذيرات {member.display_name}",
+            description=f"إجمالي التحذيرات: **{len(user_warns)}**",
+            color=discord.Color.orange()
+        )
         for i, w in enumerate(user_warns, 1):
-            embed.add_field(name=f"تحذير رقم {i}", value=f"**السبب:** {w['reason']}\n**بواسطة:** <@{w['by']}>", inline=False)
+            officer = w.get("officer_name", "غير معروف")
+            reason  = w.get("reason", "—")
+            date    = w.get("date", "—")
+            embed.add_field(
+                name=f"تحذير #{i}",
+                value=f"📌 السبب: {reason}\n👮 الضابط: {officer}\n📅 التاريخ: {date}",
+                inline=False
+            )
         await ctx.send(embed=embed)
     else:
-        # عرض آخر 10 تم تحذيرهم بالسيرفر
-        if not db["warnings_log"]:
-            return await ctx.send("لا يوجد أي تحذيرات مسجلة في السيرفر حالياً.")
-            
-        embed = discord.Embed(title="آخر 10 تحذيرات في السيرفر", color=discord.Color.orange())
-        for w in db["warnings_log"][-10:]:
-            embed.add_field(name=f"المحذّر: {w['target_name']}", value=f"السبب: {w['reason']} | بواسطة: <@{w['by_id']}>", inline=False)
+        # Global last 10 warnings
+        all_warnings = []
+        for uid, warns in warnings_db.items():
+            for w in warns:
+                all_warnings.append({"uid": uid, **w})
+
+        all_warnings.sort(key=lambda x: x.get("date", ""), reverse=True)
+        last_10 = all_warnings[:10]
+
+        if not last_10:
+            await ctx.send("✅ لا يوجد أي تحذيرات في السيرفر حتى الآن.")
+            return
+
+        embed = discord.Embed(
+            title="📋 آخر 10 تحذيرات في السيرفر",
+            color=discord.Color.red()
+        )
+        for w in last_10:
+            uid     = w.get("uid", "?")
+            reason  = w.get("reason", "—")
+            officer = w.get("officer_name", "غير معروف")
+            date    = w.get("date", "—")
+            embed.add_field(
+                name=f"<@{uid}>",
+                value=f"📌 السبب: {reason}\n👮 الضابط: {officer}\n📅 {date}",
+                inline=False
+            )
         await ctx.send(embed=embed)
 
-# ==========================================
-# 7. أوامر السلاش المتقدمة (Slash Commands)
-# ==========================================
 
-@bot.tree.command(name="تحذير", description="تحذير شخص محدد مع إرسال تفاصيل بالعام والخاص")
-async def slash_warn(interaction: discord.Interaction, شخص: discord.Member, السبب: str):
-    military_role = interaction.guild.get_role(ROLE_MILITARY)
-    if military_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ هذا الأمر مخصص للعسكر والإدارة فقط.", ephemeral=True)
-        
-    await interaction.response.send_message(f"{EMOJI_LOADING} جاري تحميل معالجة العقوبة وإصدار التحذير...")
-    await asyncio.sleep(1.5)
-    
-    user_id = str(شخص.id)
-    if user_id not in db["users"]: db["users"][user_id] = {"warnings": []}
-    if "warnings" not in db["users"][user_id]: db["users"][user_id]["warnings"] = []
-    
-    warn_entry = {"reason": السبب, "by": interaction.user.id}
-    db["users"][user_id]["warnings"].append(warn_entry)
-    
-    log_entry = {"target_name": شخص.display_name, "reason": السبب, "by_id": interaction.user.id}
-    db["warnings_log"].append(log_entry)
-    save_db()
-    
-    # الإرسال في العام
-    await interaction.channel.send(f"{EMOJI_WARN1} تم تحذير هذا الشخص {شخص.mention} بنجاح بواسطة {interaction.user.mention}. السبب: **{السبب}**")
-    
-    # الإرسال في الخاص للشخص المحذور بشكل رسمي
+# ─────────────────────────────────────────────
+#  SLASH COMMANDS
+# ─────────────────────────────────────────────
+
+# /تحذير
+@bot.tree.command(name="تحذير", description="تحذير عضو وتسجيل التحذير")
+@app_commands.describe(member="العضو المراد تحذيره", reason="سبب التحذير")
+async def warn_user(interaction: discord.Interaction, member: discord.Member, reason: str):
+    if not can_moderate(interaction.user):
+        await interaction.response.send_message("❌ ليس لديك صلاحية استخدام هذا الأمر.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"{EMOJI_LOADING} جاري التنفيذ...")
+
+    db = load_db()
+    warnings = db.get("warnings", {})
+    uid_str = str(member.id)
+    if uid_str not in warnings:
+        warnings[uid_str] = []
+
+    warn_entry = {
+        "reason":       reason,
+        "officer_id":   str(interaction.user.id),
+        "officer_name": interaction.user.display_name,
+        "date":         datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    }
+    warnings[uid_str].append(warn_entry)
+    db["warnings"] = warnings
+    save_db(db)
+
+    # Public message
+    public_msg = (
+        f"{EMOJI_WARN1} {member.mention}\n"
+        f"**تم توجيه تحذير رسمي لك**\n"
+        f"📌 السبب: **{reason}**\n"
+        f"👮 الضابط المسؤول: **{interaction.user.display_name}**"
+    )
+    await interaction.edit_original_response(content=public_msg)
+
+    # DM to warned user
+    dm_embed = discord.Embed(
+        title=f"{EMOJI_WARN2} تحذير رسمي",
+        description=(
+            f"تلقيت تحذيراً رسمياً في سيرفر **Rollback RP**.\n\n"
+            f"📌 **السبب:** {reason}\n"
+            f"👮 **الضابط المسؤول:** {interaction.user.display_name}\n"
+            f"📅 **التاريخ:** {warn_entry['date']}\n\n"
+            f"يُرجى الالتزام بقواعد السيرفر لتجنب العواقب."
+        ),
+        color=discord.Color.red()
+    )
+    dm_embed.set_footer(text="Rollback RP • Military System")
     try:
-        embed_dm = discord.Embed(title=f"{EMOJI_WARN2} تنبيه رسمي: تم تحذيرك في السيرفر", color=discord.Color.dark_red())
-        embed_dm.add_field(name="السبب المذكور", value=السبب)
-        embed_dm.add_field(name="بواسطة المسؤول", value=interaction.user.display_name)
-        embed_dm.description = "الرجاء قراءة القوانين بعناية والالتزام بنظام الحية الواقعية لتجنب التوقيف والسجن."
-        await شخص.send(embed=embed_dm)
-    except: pass
+        await member.send(embed=dm_embed)
+    except discord.Forbidden:
+        pass  # DMs disabled — silently continue
 
-@bot.tree.command(name="شيل", description="حذف وإلغاء جميع التحذيرات الموجهة لشخص")
-async def slash_clear_warns(interaction: discord.Interaction, شخص: discord.Member):
-    military_role = interaction.guild.get_role(ROLE_MILITARY)
-    if military_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ هذا الأمر مخصص للعسكر والإدارة.", ephemeral=True)
-        
-    await interaction.response.send_message(f"{EMOJI_LOADING} جاري تنظيف السجلات وحذف تحذيراته...")
-    
-    user_id = str(شخص.id)
-    if user_id in db["users"] and "warnings" in db["users"][user_id]:
-        db["users"][user_id]["warnings"] = []
-        db["warnings_log"] = [w for w in db["warnings_log"] if w["target_name"] != شخص.display_name]
-        save_db()
-        await interaction.channel.send(f"✅ تم حذف وتنظيف جميع التحذيرات السابقة للشخص {شخص.mention} بنجاح.")
+
+# /شيل
+@bot.tree.command(name="شيل", description="مسح جميع تحذيرات عضو")
+@app_commands.describe(member="العضو المراد مسح تحذيراته")
+async def clear_warnings(interaction: discord.Interaction, member: discord.Member):
+    if not can_moderate(interaction.user):
+        await interaction.response.send_message("❌ ليس لديك صلاحية استخدام هذا الأمر.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"{EMOJI_LOADING} جاري المسح...")
+
+    db = load_db()
+    warnings = db.get("warnings", {})
+    uid_str = str(member.id)
+
+    count = len(warnings.get(uid_str, []))
+    if uid_str in warnings:
+        del warnings[uid_str]
+    db["warnings"] = warnings
+    save_db(db)
+
+    await interaction.edit_original_response(
+        content=f"✅ تم مسح **{count}** تحذير(ات) للعضو {member.mention}."
+    )
+
+
+# /هويه
+@bot.tree.command(name="هويه", description="عرض هوية عضو")
+@app_commands.describe(member="العضو المراد عرض هويته")
+async def show_identity(interaction: discord.Interaction, member: discord.Member):
+    if not can_moderate(interaction.user):
+        await interaction.response.send_message("❌ ليس لديك صلاحية استخدام هذا الأمر.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    db = load_db()
+    identity = db.get("identities", {}).get(str(member.id))
+
+    if not identity:
+        await interaction.followup.send(f"❌ لا توجد هوية مسجلة للعضو {member.mention}.")
+        return
+
+    embed = discord.Embed(
+        title="🪪 بطاقة الهوية الشخصية",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="الاسم",           value=identity.get("name", "—"),        inline=True)
+    embed.add_field(name="الرقم الوطني",    value=identity.get("national_id", "—"), inline=True)
+    embed.add_field(name="العمر",           value=identity.get("age", "—"),         inline=True)
+    embed.add_field(name="الجنسية",         value=identity.get("nationality", "—"), inline=True)
+    embed.add_field(name="الجنس",           value=identity.get("gender", "—"),      inline=True)
+    embed.set_footer(text=f"Rollback RP • ID: {identity.get('national_id', '—')}")
+    await interaction.followup.send(embed=embed)
+
+
+# /حذف_هويه
+@bot.tree.command(name="حذف_هويه", description="حذف هوية عضو وإعادته للتسجيل (مشرفون فقط)")
+@app_commands.describe(member="العضو المراد حذف هويته")
+async def delete_identity(interaction: discord.Interaction, member: discord.Member):
+    # Strictly requires Admin Role or Owner
+    if not (is_owner(interaction.user) or has_admin_role(interaction.user)):
+        await interaction.response.send_message(
+            "❌ هذا الأمر مخصص لمشرفي الإدارة فقط.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+
+    db = load_db()
+    identities = db.get("identities", {})
+    uid_str = str(member.id)
+
+    if uid_str not in identities:
+        await interaction.followup.send(f"❌ لا توجد هوية مسجلة للعضو {member.mention}.")
+        return
+
+    del identities[uid_str]
+    db["identities"] = identities
+    save_db(db)
+
+    # Strip all roles and give Newcomer
+    guild = interaction.guild
+    newcomer_role = guild.get_role(NEWCOMER_ROLE_ID)
+    try:
+        # Remove all assignable roles except @everyone and bot-managed roles
+        removable = [
+            r for r in member.roles
+            if r != guild.default_role and not r.managed
+        ]
+        if removable:
+            await member.remove_roles(*removable, reason="حذف الهوية بواسطة الإدارة")
+        if newcomer_role:
+            await member.add_roles(newcomer_role, reason="إعادة تعيين دور الوافد الجديد")
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "⚠️ تم حذف الهوية من قاعدة البيانات لكن البوت لا يملك صلاحية تعديل الأدوار."
+        )
+        return
+
+    # DM the affected member
+    try:
+        dm_embed = discord.Embed(
+            title="⚠️ تم حذف هويتك",
+            description=(
+                f"قام فريق الإدارة في **Rollback RP** بحذف هويتك وإلغاء تسجيلك.\n\n"
+                f"يجب عليك إعادة التسجيل من جديد لاستخدام ميزات السيرفر.\n"
+                f"للتسجيل، توجه إلى قناة التسجيل واضغط على زر **تسجيل الهوية**."
+            ),
+            color=discord.Color.dark_red()
+        )
+        dm_embed.set_footer(text="Rollback RP • Administration")
+        await member.send(embed=dm_embed)
+    except discord.Forbidden:
+        pass
+
+    await interaction.followup.send(
+        f"✅ تم حذف هوية {member.mention} بالكامل وإعادته إلى دور الوافد الجديد."
+    )
+
+
+# ─────────────────────────────────────────────
+#  GLOBAL ERROR HANDLER
+# ─────────────────────────────────────────────
+@bot.event
+async def on_command_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ لم يتم العثور على العضو المذكور.")
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send("❌ لم يتم العثور على الرتبة المذكورة.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ ينقصك وسيط: `{error.param.name}`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ وسيط غير صحيح. تحقق من المنشن.")
     else:
-        await interaction.channel.send("هذا الشخص ليس لديه أي سجل تحذيرات لحذفه.")
+        print(f"[ERROR] {error}")
 
-@bot.tree.command(name="هويه", description="عرض بيانات الهوية الوطنية المزيفة الخاصة بالشخص")
-async def slash_identity(interaction: discord.Interaction, شخص: discord.Member):
-    military_role = interaction.guild.get_role(ROLE_MILITARY)
-    if military_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ هذا الأمر مخصص للعساكر فقط لرؤية الهويات.", ephemeral=True)
-        
-    await interaction.response.send_message(f"{EMOJI_LOADING} جاري فحص النظام المركزي للاستعلام عن الهوية...")
-    await asyncio.sleep(1)
-    
-    u_data = db["users"].get(str(شخص.id))
-    if not u_data or not u_data.get("national_id"):
-        return await interaction.channel.send(f"❌ الشخص {شخص.mention} ليس لديه هوية وطنية مسجلة في النظام حتى الآن.")
-        
-    embed = discord.Embed(title=f"🪪 الهوية الوطنية الإلكترونية للـمواطن", color=discord.Color.blue())
-    embed.add_field(name="الاسم الكامل", value=u_data["name"], inline=True)
-    embed.add_field(name="الرقم الوطني المزيف", value=u_data["national_id"], inline=True)
-    embed.add_field(name="العمر", value=u_data["age"], inline=True)
-    embed.add_field(name="الجنسية والبلد", value=u_data["nationality"], inline=True)
-    embed.add_field(name="الجنس", value=u_data["gender"], inline=True)
-    await interaction.channel.send(embed=embed)
 
-@bot.tree.command(name="حذف_هويه", description="مسح هوية الشخص تماماً وتجريده من رتبه (للإدارة فقط)")
-async def slash_delete_identity(interaction: discord.Interaction, شخص: discord.Member):
-    admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
-    if admin_role not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ هذا الأمر مخصص لأصحاب رتبة الإدارة العليا المحددة فقط.", ephemeral=True)
-        
-    await interaction.response.send_message(f"{EMOJI_LOADING} جاري حذف الهوية من قاعدة البيانات وتجريد الرتب...")
-    
-    user_id = str(شخص.id)
-    if user_id in db["users"]:
-        db["users"][user_id]["national_id"] = None
-        db["users"][user_id]["name"] = None
-        save_db()
-        
-        # سحب جميع الرتب وإعطاء رتبة الدخول
-        try:
-            newcomer_role = interaction.guild.get_role(ROLE_NEWCOMER)
-            await شخص.edit(roles=[newcomer_role] if newcomer_role else [])
-            await شخص.send("⚠️ تم مسح هويتك الوطنية من قبل الإدارة وسحب رتبك، يرجى إعادة تقديم الهوية مجدداً.")
-        except: pass
-        
-        await interaction.channel.send(f"✅ تم حذف هوية {شخص.mention} بنجاح وإعادته لرتبة الدخول لتسجيل هوية جديدة.")
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    msg = f"❌ حدث خطأ: {error}"
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
     else:
-        await interaction.channel.send("الشخص غير مسجل بالأساس في النظام.")
+        await interaction.response.send_message(msg, ephemeral=True)
+    print(f"[SLASH ERROR] {error}")
 
-# ==========================================
-# 8. أوامر التجهيزات الإدارية الفريدة (!أبدأ)
-# ==========================================
 
-@bot.command(name="أبدأ١")
-async def setup_start1(ctx):
-    if ctx.author.id != OWNER_ID: return
-    await ctx.message.delete()
-    embed = discord.Embed(title="تسجيل دخول وخروج العسكر", description="اضغط على الزر بالأسفل لتغيير حالتك بين متصل (On Duty) وغير متصل (Off Duty) تلقائياً.", color=discord.Color.green())
-    await ctx.send(embed=embed, view=DutyView())
-
-@bot.command(name="أبدأ٢")
-async def setup_start2(ctx):
-    if ctx.author.id != OWNER_ID: return
-    await ctx.message.delete()
-    embed = discord.Embed(title="البث المراقب لتسجيلات الدخول والخروج العسكرية", description="جاري تهيئة البث المباشر وعرض العساكر...", color=discord.Color.blue())
-    msg = await ctx.send(embed=embed)
-    db["live_log_msg"] = [ctx.channel.id, msg.id]
-    save_db()
-    await update_live_log(ctx.guild)
-
-@bot.command(name="أبدأ٣")
-async def setup_start3(ctx):
-    if ctx.author.id != OWNER_ID: return
-    await ctx.message.delete()
-    embed = discord.Embed(title="تأكيد وتوثيق الدخول للسيرفر رولباك", description="أهلاً بك في مدينة الحياة الواقعية. يرجى الضغط على الزر أدناه لتعبئة بيانات الهوية الوطنية الخاصة بك عبر النافذة الرسمية مباشرة.", color=discord.Color.gold())
-    await ctx.send(embed=embed, view=Start3View())
-
-# ==========================================
-# 9. تشغيل البوت النهائي
-# ==========================================
+# ─────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    keep_alive() # تشغيل خادم الويب للحماية من النوم
-    TOKEN = os.getenv("DISCORD_TOKEN")
-    if TOKEN:
-        bot.run(TOKEN)
-    else:
-        print("❌ خطأ: لم يتم العثور على المتغير DISCORD_TOKEN في إعدادات Render.")
+    keep_alive()
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("DISCORD_TOKEN environment variable not set!")
+    bot.run(token)
