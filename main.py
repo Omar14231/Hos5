@@ -325,9 +325,9 @@ async def mdt_system(interaction: discord.Interaction, شخص: discord.Member):
 
 @bot.tree.command(name="نقاط", description="إعطاء نقاط لعسكري")
 async def give_points(interaction: discord.Interaction, شخص: discord.Member, كم: int):
-    # مخصص لمسؤول العسكر أو الأونر
-    if interaction.guild.get_role(ROLE_MILITARY_ADMIN) not in interaction.user.roles and interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ هذا الأمر لمسؤول العسكر فقط.", ephemeral=True)
+    # مخصص لمسؤول العسكر أو الأونر أو الإدارة
+    if interaction.guild.get_role(ROLE_MILITARY_ADMIN) not in interaction.user.roles and interaction.guild.get_role(ROLE_ADMIN) not in interaction.user.roles and interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ هذا الأمر لمسؤول العسكر والإدارة فقط.", ephemeral=True)
         
     uid = str(شخص.id)
     if uid not in db["users"]: return await interaction.response.send_message("❌ غير مسجل.")
@@ -335,6 +335,40 @@ async def give_points(interaction: discord.Interaction, شخص: discord.Member, 
     db["users"][uid]["points"] = db["users"][uid].get("points", 0) + كم
     save_db()
     await interaction.response.send_message(f"✅ تم إضافة **{كم}** نقطة للعسكري {شخص.mention}.")
+
+# --- الإضافات الجديدة ---
+
+@bot.tree.command(name="كم_معه", description="معرفة عدد نقاط شخص معين")
+async def check_points(interaction: discord.Interaction, شخص: discord.Member):
+    # مخصص لمسؤول العسكر والإدارة والأونر
+    if interaction.guild.get_role(ROLE_MILITARY_ADMIN) not in interaction.user.roles and interaction.guild.get_role(ROLE_ADMIN) not in interaction.user.roles and interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ هذا الأمر للإدارة ومسؤول العسكر فقط.", ephemeral=True)
+        
+    uid = str(شخص.id)
+    if uid not in db["users"]: 
+        return await interaction.response.send_message("❌ هذا الشخص غير مسجل في النظام.", ephemeral=True)
+    
+    pts = db["users"][uid].get("points", 0)
+    await interaction.response.send_message(f"📊 العسكري {شخص.mention} يمتلك حالياً **{pts}** نقطة.")
+
+@bot.tree.command(name="سحب_نقاط", description="سحب نقاط من عسكري")
+async def remove_points(interaction: discord.Interaction, شخص: discord.Member, العدد: int):
+    # مخصص لمسؤول العسكر والإدارة والأونر
+    if interaction.guild.get_role(ROLE_MILITARY_ADMIN) not in interaction.user.roles and interaction.guild.get_role(ROLE_ADMIN) not in interaction.user.roles and interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ هذا الأمر للإدارة ومسؤول العسكر فقط.", ephemeral=True)
+        
+    uid = str(شخص.id)
+    if uid not in db["users"]: 
+        return await interaction.response.send_message("❌ هذا الشخص غير مسجل في النظام.", ephemeral=True)
+    
+    current_pts = db["users"][uid].get("points", 0)
+    new_pts = max(0, current_pts - العدد) # لتجنب أن تكون النقاط بالسالب
+    db["users"][uid]["points"] = new_pts
+    save_db()
+    
+    await interaction.response.send_message(f"✅ تم سحب **{العدد}** نقطة من {شخص.mention}. نقاطه الحالية: **{new_pts}** نقطة.")
+
+# ------------------------
 
 @bot.tree.command(name="حذف_هويه", description="مسح هوية مواطن وإرجاعه للبداية")
 async def wipe_id(interaction: discord.Interaction, شخص: discord.Member):
@@ -404,6 +438,17 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f"تم مزامنة {len(synced)} أمر سلاش.")
     except Exception as e: print(e)
+
+# --- إضافة حدث دخول العضو (إعطاء رتبة الجديد تلقائياً) ---
+@bot.event
+async def on_member_join(member):
+    newcomer_role = member.guild.get_role(ROLE_NEWCOMER)
+    if newcomer_role:
+        try:
+            await member.add_roles(newcomer_role)
+        except discord.Forbidden:
+            pass
+# --------------------------------------------------------
 
 if __name__ == "__main__":
     keep_alive()
