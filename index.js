@@ -10,7 +10,7 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.DirectMessages,
-        GatewayIntentBits.GuildMessageReactions // تمت الإضافة للتحكم بالرياكشنات
+        GatewayIntentBits.GuildMessageReactions
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
@@ -47,11 +47,13 @@ client.on('ready', async () => {
     
     const commands = [
         { name: 'حذف_هويه', description: 'حذف هوية شخص وإرجاعه غير معروف', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
-        { name: 'mdt', description: 'كشف معلومات الشخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
-        { name: 'اسم_الشخص', description: 'عرض اسم الشخص في روبلوكس', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] }, // تمت الإضافة
+        { name: 'mdt', description: 'كشف معلومات الشخص الشاملة', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
+        { name: 'اسم_الشخص', description: 'عرض اسم الشخص في روبلوكس', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
         { name: 'تغير', description: 'تغيير شخصية اللاعب (مثال: مجرم)', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }, { name: 'التغير', type: 3, description: 'الاسم الجديد', required: true }] },
         { name: 'تحذير', description: 'تحذير شخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }, { name: 'السبب', type: 3, description: 'سبب التحذير', required: true }] },
         { name: 'شيل', description: 'مسح تحذيرات شخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
+        { name: 'أضيف_في_سجل_اجرامي', description: 'إضافة تهمة أو جريمة لسجل الشخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }, { name: 'الأضافه', type: 3, description: 'الجريمة/المخالفة', required: true }] },
+        { name: 'شيل_اجرامي', description: 'مسح السجل الإجرامي لشخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
         { 
             name: 'رول', description: 'إعطاء أو سحب رتب متعددة', 
             options: [
@@ -78,11 +80,10 @@ client.on('ready', async () => {
     }
 });
 
-// --- مراقبة الرسائل الجديدة (للرومات المحددة والأوامر) ---
+// --- مراقبة الرسائل الجديدة ---
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    // أوامر الأونر بالبادئة (!أبدأ)
     if (message.member?.roles.cache.has(ROLES.OWNER)) {
         if (message.content === '!أبدأ١') {
             message.delete();
@@ -110,7 +111,6 @@ client.on('messageCreate', async message => {
         }
     }
 
-    // روم التحقق من اسم روبلوكس
     if (message.channel.id === '1523047764743815250') {
         const db = loadDB();
         const userDb = db[message.author.id];
@@ -121,13 +121,12 @@ client.on('messageCreate', async message => {
         }
     }
 
-    // روم التبليغات
     if (message.channel.id === '1523049793486852267') {
         await message.channel.send(`<@&${ROLES.MILITARY}> <@&${ROLES.OWNER}>\nهناك شخص قد بلغ عن شخص أو مشكلة تقنية.`);
     }
 });
 
-// --- مراقبة تعديل الرسائل (خاص بروم اسم روبلوكس) ---
+// --- مراقبة تعديل الرسائل ---
 client.on('messageUpdate', async (oldMessage, newMessage) => {
     if (newMessage.author?.bot) return;
 
@@ -137,12 +136,10 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
         
         if (userDb && userDb.roblox === newMessage.content.trim()) {
             try {
-                // إزالة علامة الخطأ إذا كانت موجودة
                 const crossReaction = newMessage.reactions.resolve('❌');
                 if (crossReaction && crossReaction.users.cache.has(client.user.id)) {
                     await crossReaction.users.remove(client.user.id);
                 }
-                // إضافة علامة الصح
                 await newMessage.react('✅');
             } catch (err) {
                 console.error("Error updating reactions:", err);
@@ -151,11 +148,10 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
     }
 });
 
-// --- التفاعلات (أزرار، مودلز، أوامر سلاش) ---
+// --- التفاعلات ---
 client.on('interactionCreate', async interaction => {
     const db = loadDB();
 
-    // -- معالجة الأزرار --
     if (interaction.isButton()) {
         const id = interaction.customId;
 
@@ -191,7 +187,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.showModal(modal);
         }
 
-        // أزرار التكت
         else if (id === 't_claim') {
             if (!interaction.member.roles.cache.has(ROLES.SUPPORT)) return interaction.reply({ content: 'ليس لديك صلاحية.', ephemeral: true });
             await interaction.channel.permissionOverwrites.edit(ROLES.SUPPORT, { SendMessages: true });
@@ -214,7 +209,6 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // -- معالجة المودلز (النوافذ المنبثقة) --
     if (interaction.isModalSubmit()) {
         if (interaction.customId === 'modal_create_id') {
             const name = interaction.fields.getTextInputValue('name');
@@ -225,7 +219,7 @@ client.on('interactionCreate', async interaction => {
             const nat_id = Math.floor(100000 + Math.random() * 900000).toString();
             
             db[interaction.user.id] = {
-                national_id: nat_id, name, age, roblox, character: 'مواطن', warnings: [], points: 0,
+                national_id: nat_id, name, age, roblox, character: 'مواطن', warnings: [], points: 0, criminal_record: [],
                 joinedAt: new Date().toLocaleDateString()
             };
             saveDB(db);
@@ -281,7 +275,6 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // -- معالجة أوامر السلاش --
     if (interaction.isChatInputCommand()) {
         const { commandName, options, member } = interaction;
         const targetMember = options.getMember('الشخص');
@@ -301,24 +294,55 @@ client.on('interactionCreate', async interaction => {
         else if (commandName === 'mdt') {
             if (!isOwner && !isMilitary) return interaction.reply({ content: 'للعسكر والاونر فقط.', ephemeral: true });
             const data = db[targetId];
-            if (!data) return interaction.reply('لا توجد بيانات لهذا الشخص.');
+            if (!data) return interaction.reply('لا توجد بيانات لهذا الشخص في قاعدة البيانات.');
             
+            // ترتيب وعرض السجل الإجرامي والتحذيرات
+            const criminalRecordText = (data.criminal_record && data.criminal_record.length > 0) 
+                ? data.criminal_record.map((c, i) => `**${i + 1}-** ${c}`).join('\n') 
+                : '✅ سجله نظيف';
+            
+            const warningsText = (data.warnings && data.warnings.length > 0)
+                ? data.warnings.map((w, i) => `**${i + 1}-** ${w}`).join('\n')
+                : '✅ لا يوجد تحذيرات';
+
             const embedFields = [
+                { name: 'الاسم (حسب الهوية)', value: data.name || 'غير مسجل', inline: true },
+                { name: 'العمر', value: data.age || 'غير مسجل', inline: true },
+                { name: 'الاسم في روبلوكس', value: data.roblox || 'غير مسجل', inline: true },
                 { name: 'الرقم الوطني', value: data.national_id || 'لا يوجد' },
-                { name: 'الاسم في روبلوكس', value: data.roblox || 'غير مسجل' }, // تمت الإضافة
                 { name: 'الشخصية', value: data.character || 'مواطن' },
-                { name: 'عدد التحذيرات', value: `${data.warnings.length}` },
+                { name: 'السجل الإجرامي 🚨', value: criminalRecordText },
+                { name: 'سجل التحذيرات ⚠️', value: warningsText },
                 { name: 'تاريخ التسجيل بالديسكورد', value: targetMember.user.createdAt.toLocaleDateString() }
             ];
 
-            // إظهار النقاط فقط للعسكر
             if (targetMember.roles.cache.has(ROLES.MILITARY)) {
-                embedFields.push({ name: 'النقاط', value: `${data.points || 0}` });
+                embedFields.push({ name: 'النقاط العسكرية 🎖️', value: `${data.points || 0}` });
             }
             
-            const embed = new EmbedBuilder().setTitle(`MDT: ${targetMember.user.username}`).setColor('Blue')
+            const embed = new EmbedBuilder().setTitle(`MDT 📋 | ${targetMember.user.username}`).setColor('DarkBlue')
                 .addFields(embedFields);
             interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'أضيف_في_سجل_اجرامي') {
+            if (!isOwner && !isMilitary) return interaction.reply({ content: 'للعسكر والاونر فقط.', ephemeral: true });
+            const addition = options.getString('الأضافه');
+            if (!db[targetId]) db[targetId] = { criminal_record: [] };
+            if (!db[targetId].criminal_record) db[targetId].criminal_record = [];
+            
+            db[targetId].criminal_record.push(addition);
+            saveDB(db);
+            interaction.reply(`تمت إضافة الجريمة/المخالفة إلى السجل الإجرامي لـ ${targetMember} بنجاح 🚨.`);
+        }
+
+        else if (commandName === 'شيل_اجرامي') {
+            if (!isOwner && !isMilitary) return interaction.reply({ content: 'للعسكر والاونر فقط.', ephemeral: true });
+            if (db[targetId]) {
+                db[targetId].criminal_record = [];
+                saveDB(db);
+            }
+            interaction.reply(`تم تبييض ومسح السجل الإجرامي لـ ${targetMember} بالكامل 🧹.`);
         }
 
         else if (commandName === 'اسم_الشخص') {
@@ -421,7 +445,6 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// --- خادم ويب وهمي لتجاوز مشكلة رندر وتجنب الإغلاق التلقائي ---
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
