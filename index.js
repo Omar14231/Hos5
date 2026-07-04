@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, REST, Routes, PermissionsBitField } = require('discord.js');
 const fs = require('fs');
+const http = require('http'); // مكتبة الويب المطلوبة لرندر
 
 const client = new Client({
     intents: [
@@ -242,7 +243,6 @@ client.on('interactionCreate', async interaction => {
         const targetMember = options.getMember('الشخص');
         const targetId = targetMember?.id;
 
-        // التحقق من الصلاحيات المبدئية
         const isOwner = member.roles.cache.has(ROLES.OWNER);
         const isMilitary = member.roles.cache.has(ROLES.MILITARY);
 
@@ -289,7 +289,7 @@ client.on('interactionCreate', async interaction => {
 
             try {
                 await targetMember.send(`تم تحذيرك من قبل ${interaction.user}\n**السبب:** ${reason}\n<a:AttentionAnimated:1478492988421443757> <a:emoji_26:1520109726065496295>`);
-            } catch(e) {} // إذا كان الخاص مغلق
+            } catch(e) {}
             interaction.reply(`تم تحذير ${targetMember} بنجاح وتسجيله في MDT.`);
         }
 
@@ -361,6 +361,16 @@ client.on('interactionCreate', async interaction => {
             interaction.reply(`تم سحب النقاط من ${targetMember}. الإجمالي الحالي: ${db[targetId].points}`);
         }
     }
+});
+
+// --- خادم ويب وهمي لتجاوز مشكلة رندر وتجنب الإغلاق التلقائي ---
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.write('البوت يعمل بنجاح! 🚀');
+    res.end();
+}).listen(port, () => {
+    console.log(`تم تشغيل خادم الويب الوهمي على المنفذ ${port}`);
 });
 
 client.login(process.env.DISCORD_TOKEN);
