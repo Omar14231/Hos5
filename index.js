@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, REST, Routes, PermissionsBitField } = require('discord.js');
 const fs = require('fs');
-const http = require('http'); // مكتبة الويب المطلوبة لرندر
+const http = require('http'); 
 
 const client = new Client({
     intents: [
@@ -9,7 +9,8 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMessageReactions // تمت الإضافة للتحكم بالرياكشنات
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
@@ -44,10 +45,10 @@ client.on('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     
-    // مسح جميع الأوامر السابقة ثم إضافة الجديدة
     const commands = [
         { name: 'حذف_هويه', description: 'حذف هوية شخص وإرجاعه غير معروف', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
         { name: 'mdt', description: 'كشف معلومات الشخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
+        { name: 'اسم_الشخص', description: 'عرض اسم الشخص في روبلوكس', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] }, // تمت الإضافة
         { name: 'تغير', description: 'تغيير شخصية اللاعب (مثال: مجرم)', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }, { name: 'التغير', type: 3, description: 'الاسم الجديد', required: true }] },
         { name: 'تحذير', description: 'تحذير شخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }, { name: 'السبب', type: 3, description: 'سبب التحذير', required: true }] },
         { name: 'شيل', description: 'مسح تحذيرات شخص', options: [{ name: 'الشخص', type: 6, description: 'العضو', required: true }] },
@@ -77,33 +78,76 @@ client.on('ready', async () => {
     }
 });
 
-// --- أوامر الأونر بالبادئة (!أبدأ) ---
+// --- مراقبة الرسائل الجديدة (للرومات المحددة والأوامر) ---
 client.on('messageCreate', async message => {
-    if (message.author.bot || !message.member?.roles.cache.has(ROLES.OWNER)) return;
+    if (message.author.bot) return;
 
-    if (message.content === '!أبدأ١') {
-        message.delete();
-        const embed = new EmbedBuilder().setColor('Green').setTitle('اصنع هويتك').setDescription('يرجى الضغط على الزر أدناه لصنع هويتك الخاصة بالسيرفر.');
-        const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_create_id').setLabel('اصنع هويتك').setStyle(ButtonStyle.Success));
-        message.channel.send({ embeds: [embed], components: [btn] });
+    // أوامر الأونر بالبادئة (!أبدأ)
+    if (message.member?.roles.cache.has(ROLES.OWNER)) {
+        if (message.content === '!أبدأ١') {
+            message.delete();
+            const embed = new EmbedBuilder().setColor('Green').setTitle('اصنع هويتك').setDescription('يرجى الضغط على الزر أدناه لصنع هويتك الخاصة بالسيرفر.');
+            const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_create_id').setLabel('اصنع هويتك').setStyle(ButtonStyle.Success));
+            message.channel.send({ embeds: [embed], components: [btn] });
+        }
+        else if (message.content === '!أبدأ٢') {
+            message.delete();
+            const embed = new EmbedBuilder().setColor('Blue').setTitle('رؤية رقمي الوطني').setDescription('اضغط على الزر لمعرفة رقمك الوطني في السيرفر.');
+            const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_view_id').setLabel('رؤية رقمي').setStyle(ButtonStyle.Primary));
+            message.channel.send({ embeds: [embed], components: [btn] });
+        }
+        else if (message.content === '!أبدأ٣') {
+            message.delete();
+            const embed = new EmbedBuilder().setColor('Gold').setTitle('توثيق نفسك').setDescription('توثيق نفسك لفتح جميع الرومات المحددة لك وكل شيء مخصص لك.');
+            const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_verify').setLabel('توثيق').setStyle(ButtonStyle.Secondary));
+            message.channel.send({ embeds: [embed], components: [btn] });
+        }
+        else if (message.content === '!أبدأ٤') {
+            message.delete();
+            const embed = new EmbedBuilder().setColor('DarkRed').setTitle('تكت راقبي').setDescription('للتواصل مع الإدارة أو فتح تذكرة دعم، اضغط على الزر أدناه.').setImage(TICKET_IMAGE);
+            const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_open_ticket').setLabel('افتح تكت').setStyle(ButtonStyle.Danger));
+            message.channel.send({ embeds: [embed], components: [btn] });
+        }
     }
-    else if (message.content === '!أبدأ٢') {
-        message.delete();
-        const embed = new EmbedBuilder().setColor('Blue').setTitle('رؤية رقمي الوطني').setDescription('اضغط على الزر لمعرفة رقمك الوطني في السيرفر.');
-        const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_view_id').setLabel('رؤية رقمي').setStyle(ButtonStyle.Primary));
-        message.channel.send({ embeds: [embed], components: [btn] });
+
+    // روم التحقق من اسم روبلوكس
+    if (message.channel.id === '1523047764743815250') {
+        const db = loadDB();
+        const userDb = db[message.author.id];
+        if (userDb && userDb.roblox === message.content.trim()) {
+            await message.react('✅');
+        } else {
+            await message.react('❌');
+        }
     }
-    else if (message.content === '!أبدأ٣') {
-        message.delete();
-        const embed = new EmbedBuilder().setColor('Gold').setTitle('توثيق نفسك').setDescription('توثيق نفسك لفتح جميع الرومات المحددة لك وكل شيء مخصص لك.');
-        const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_verify').setLabel('توثيق').setStyle(ButtonStyle.Secondary));
-        message.channel.send({ embeds: [embed], components: [btn] });
+
+    // روم التبليغات
+    if (message.channel.id === '1523049793486852267') {
+        await message.channel.send(`<@&${ROLES.MILITARY}> <@&${ROLES.OWNER}>\nهناك شخص قد بلغ عن شخص أو مشكلة تقنية.`);
     }
-    else if (message.content === '!أبدأ٤') {
-        message.delete();
-        const embed = new EmbedBuilder().setColor('DarkRed').setTitle('تكت راقبي').setDescription('للتواصل مع الإدارة أو فتح تذكرة دعم، اضغط على الزر أدناه.').setImage(TICKET_IMAGE);
-        const btn = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('btn_open_ticket').setLabel('افتح تكت').setStyle(ButtonStyle.Danger));
-        message.channel.send({ embeds: [embed], components: [btn] });
+});
+
+// --- مراقبة تعديل الرسائل (خاص بروم اسم روبلوكس) ---
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+    if (newMessage.author?.bot) return;
+
+    if (newMessage.channel.id === '1523047764743815250') {
+        const db = loadDB();
+        const userDb = db[newMessage.author.id];
+        
+        if (userDb && userDb.roblox === newMessage.content.trim()) {
+            try {
+                // إزالة علامة الخطأ إذا كانت موجودة
+                const crossReaction = newMessage.reactions.resolve('❌');
+                if (crossReaction && crossReaction.users.cache.has(client.user.id)) {
+                    await crossReaction.users.remove(client.user.id);
+                }
+                // إضافة علامة الصح
+                await newMessage.react('✅');
+            } catch (err) {
+                console.error("Error updating reactions:", err);
+            }
+        }
     }
 });
 
@@ -259,15 +303,29 @@ client.on('interactionCreate', async interaction => {
             const data = db[targetId];
             if (!data) return interaction.reply('لا توجد بيانات لهذا الشخص.');
             
+            const embedFields = [
+                { name: 'الرقم الوطني', value: data.national_id || 'لا يوجد' },
+                { name: 'الاسم في روبلوكس', value: data.roblox || 'غير مسجل' }, // تمت الإضافة
+                { name: 'الشخصية', value: data.character || 'مواطن' },
+                { name: 'عدد التحذيرات', value: `${data.warnings.length}` },
+                { name: 'تاريخ التسجيل بالديسكورد', value: targetMember.user.createdAt.toLocaleDateString() }
+            ];
+
+            // إظهار النقاط فقط للعسكر
+            if (targetMember.roles.cache.has(ROLES.MILITARY)) {
+                embedFields.push({ name: 'النقاط', value: `${data.points || 0}` });
+            }
+            
             const embed = new EmbedBuilder().setTitle(`MDT: ${targetMember.user.username}`).setColor('Blue')
-                .addFields(
-                    { name: 'الرقم الوطني', value: data.national_id || 'لا يوجد' },
-                    { name: 'الشخصية', value: data.character || 'مواطن' },
-                    { name: 'النقاط', value: `${data.points}` },
-                    { name: 'عدد التحذيرات', value: `${data.warnings.length}` },
-                    { name: 'تاريخ التسجيل بالديسكورد', value: targetMember.user.createdAt.toLocaleDateString() }
-                );
+                .addFields(embedFields);
             interaction.reply({ embeds: [embed] });
+        }
+
+        else if (commandName === 'اسم_الشخص') {
+            if (!isOwner && !isMilitary) return interaction.reply({ content: 'للعسكر والاونر فقط.', ephemeral: true });
+            const data = db[targetId];
+            if (!data || !data.roblox) return interaction.reply({ content: 'هذا الشخص لم يسجل هويته بعد أو ليس لديه اسم روبلوكس مسجل.', ephemeral: true });
+            interaction.reply(`اسم الشخص ${targetMember} في روبلوكس هو: **${data.roblox}**`);
         }
 
         else if (commandName === 'تغير') {
